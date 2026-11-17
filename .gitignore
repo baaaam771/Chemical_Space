@@ -1,0 +1,18 @@
+.venv/
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.pytest_cache/
+
+# Data stays out of git, all of it.
+#
+# `data/` holds 34 GB: a 29 GB ChEMBL SQLite release, its 5.4 GB tarball, the
+# derived parquet snapshots, placement caches, saved sessions and figures.
+# None of it is source, every byte of it is rebuildable from the scripts, and
+# GitHub refuses single files over 100 MB -- so this is an allow-list, not a
+# deny-list. Listing the big directories one by one is how a new one gets
+# committed by accident the next time somebody adds a cache.
+data/*
+!data/.gitkeep
+
+*.parquet

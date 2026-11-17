@@ -1,0 +1,11 @@
+# Normalise to LF in the repository and on checkout.
+#
+# Windows is the development machine but the GPU box and the SQLite download
+# run on Linux, and a shell script checked out with CRLF fails there with
+# `bad interpreter: /bin/sh^M` -- which reads as a missing shell rather than a
+# line ending. Keeping one convention everywhere avoids the whole class.
+* text=auto eol=lf
+
+*.npz binary
+*.parquet binary
+*.png binary

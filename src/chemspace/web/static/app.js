@@ -1,0 +1,700 @@
+"use strict";
+
+/* Front end for the exploration engine.
+ *
+ * It holds a session id, the current node id, and whatever the user has
+ * lassoed. Everything else -- the tree, the placements, the profiles -- lives
+ * on the server, same as in the Jupyter viewer. Narrowing and switching are
+ * two POSTs; the page just redraws whatever node comes back. */
+
+const PALETTE = [
+  "#4C78A8", "#F58518", "#54A24B", "#E45756", "#72B7B2",
+  "#EECA3B", "#B279A2", "#FF9DA6", "#9D755D", "#7F7F7F",
+  "#1B9E77", "#D95F02", "#7570B3", "#E7298A", "#66A61E",
+  "#E6AB02", "#A6761D", "#666666", "#8DD3C7", "#FB8072",
+];
+const NOISE = -1, UNCOVERED = -2;
+const NOISE_COLOR = "#C9CDD4", UNCOVERED_COLOR = "#E8EAED";
+
+const state = {
+  sessionId: null,
+  nodeId: null,
+  node: null,
+  points: null,
+  /* The selection is a Set of point indices within the current node, and that
+   * is the entire contract the server cares about (`point_indices`) -- it
+   * never asks how they were picked. So a lasso drag, a shift-click and a
+   * cluster pick all write into the same place and mix freely. */
+  selection: new Set(),
+  polygon: null,
+  polygonPartial: false,   // true once the polygon no longer *is* the selection
+  clickToggles: 0,         // how many individual shift-clicks went into it
+  domains: [],
+  colorBy: "cluster",
+  /* Per-domain coverage of the *current* node, fetched after it loads.
+   * The whole point of holding it is to label the domain picker before the
+   * click: a switch onto a domain that covers 91 of 1,200 compounds costs the
+   * same 20 seconds as a useful one and leaves an empty map. */
+  domainCoverage: null,
+  drugLayer: null,
+};
+
+const $ = (id) => document.getElementById(id);
+
+/* Plotly's click event carries the DOM event, but its selection events do not
+ * reliably, so track the modifier ourselves rather than depending on it.
+ * Clearing on blur matters: alt-tabbing away while holding shift would
+ * otherwise leave every later drag in "add to selection" mode. */
+let shiftHeld = false;
+addEventListener("keydown", (e) => { if (e.key === "Shift") shiftHeld = true; });
+addEventListener("keyup", (e) => { if (e.key === "Shift") shiftHeld = false; });
+addEventListener("blur", () => { shiftHeld = false; });
+const withShift = (ev) => shiftHeld || !!(ev && ev.event && ev.event.shiftKey);
+
+/* Set while we are writing the selection back into the plot, so our own
+ * relayout/restyle cannot come back round as if the user had done it. */
+let applying = false;
+
+/* ----------------------------------------------------------------- http */
+
+async function api(path, options) {
+  const res = await fetch(path, {
+    headers: { "Content-Type": "application/json" },
+    ...options,
+  });
+  if (!res.ok) {
+    let msg = `${res.status} ${res.statusText}`;
+    try {
+      const body = await res.json();
+      if (body.detail) msg = typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail);
+    } catch (_) { /* keep the status line */ }
+    throw new Error(msg);
+  }
+  return res.json();
+}
+
+const post = (path, body) =>
+  api(path, { method: "POST", body: JSON.stringify(body || {}) });
+
+/* Poll a job to completion. Placement can take 75-105s, so this shows what is
+ * running and how long it has been going rather than an opaque spinner. */
+async function awaitJob(job, label) {
+  showBusy(true, label || job.detail);
+  try {
+    let current = job;
+    while (current.state === "pending" || current.state === "running") {
+      $("busyElapsed").textContent = `${current.elapsed.toFixed(0)}초 경과`;
+      await new Promise((r) => setTimeout(r, 700));
+      current = await api(`/api/jobs/${job.job_id}`);
+    }
+    if (current.state === "error") throw new Error(current.error);
+    return current.result;
+  } finally {
+    showBusy(false);
+  }
+}
+
+function showBusy(on, text) {
+  $("busy").classList.toggle("hidden", !on);
+  if (text) $("busyText").textContent = text;
+  if (!on) $("busyElapsed").textContent = "";
+}
+
+let toastTimer = null;
+function toast(msg, isError) {
+  const el = $("toast");
+  el.textContent = msg;
+  el.classList.toggle("error", !!isError);
+  el.classList.remove("hidden");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.add("hidden"), isError ? 7000 : 3500);
+}
+
+/* ---------------------------------------------------------------- colour */
+
+function colourPoints(pts) {
+  const legend = new Map();
+  let colors;
+
+  if (state.colorBy === "cluster") {
+    colors = pts.cluster.map((c) => {
+      if (c === UNCOVERED) return UNCOVERED_COLOR;
+      if (c === NOISE) return NOISE_COLOR;
+      return PALETTE[c % PALETTE.length];
+    });
+    const counts = new Map();
+    pts.cluster.forEach((c) => counts.set(c, (counts.get(c) || 0) + 1));
+    [...counts.keys()].filter((c) => c >= 0).sort((a, b) => a - b)
+      .forEach((c) => legend.set(`군집 ${c}`, [PALETTE[c % PALETTE.length], counts.get(c)]));
+    if (counts.has(NOISE)) legend.set("noise", [NOISE_COLOR, counts.get(NOISE)]);
+    if (counts.has(UNCOVERED)) legend.set("데이터 없음", [UNCOVERED_COLOR, counts.get(UNCOVERED)]);
+  } else {
+    const field = pts[state.colorBy] ? state.colorBy : "modality";
+    const values = pts[field].map((v) => v || "미분류");
+    const counts = new Map();
+    values.forEach((v) => counts.set(v, (counts.get(v) || 0) + 1));
+    const order = [...counts.entries()].sort((a, b) => b[1] - a[1]);
+    const map = new Map(order.map(([k], i) => [k, PALETTE[i % PALETTE.length]]));
+    colors = values.map((v) => map.get(v));
+    order.forEach(([k, n]) => legend.set(k, [map.get(k), n]));
+  }
+  return { colors, legend };
+}
+
+function renderLegend(legend) {
+  const rows = [...legend.entries()].slice(0, 30).map(
+    ([name, [color, count]]) =>
+      `<div class="legend-row"><span class="swatch" style="background:${color}"></span>` +
+      `<span>${escapeHtml(name)}</span><span class="count">${count.toLocaleString()}</span></div>`
+  );
+  if (legend.size > 30) rows.push(`<div class="muted small">… 외 ${legend.size - 30}개</div>`);
+  $("legend").innerHTML = rows.join("");
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+/* 으로 / 로, by whether the last syllable has a final consonant.
+ * Mirrors chemspace/session/korean.py -- the server gets this right in the
+ * breadcrumb, and a toast reading "질환로" right beside it is just wrong. */
+function josaRo(word) {
+  const ch = String(word).trim().slice(-1);
+  const code = ch.charCodeAt(0);
+  if (!(code >= 0xac00 && code <= 0xd7a3)) return `${word}(으)로`;
+  const jong = (code - 0xac00) % 28;
+  return jong === 0 || jong === 8 ? `${word}로` : `${word}으로`;  // 8 = ㄹ
+}
+
+/* ------------------------------------------------------------------ plot */
+
+/* Pan and zoom belong to the node, not to the redraw. A new node is a fresh
+ * placement with its own coordinate range, so it opens fitted to everything;
+ * redrawing the *same* node -- recolouring -- has to leave the user where
+ * they were, or every colour change throws away the zoom they just made. */
+let drawnNode = null;
+
+function currentView() {
+  const lay = $("plot").layout;
+  if (drawnNode !== state.nodeId || !lay || !lay.xaxis || !lay.xaxis.range) return null;
+  return { x: lay.xaxis.range.slice(), y: lay.yaxis.range.slice() };
+}
+
+function drawPlot(pts) {
+  const { colors, legend } = colourPoints(pts);
+  renderLegend(legend);
+
+  const hover = pts.chembl_id.map((id, i) =>
+    `${id}${pts.name[i] ? " · " + pts.name[i] : ""}<br>` +
+    `${pts.modality[i]} · MW ${pts.mw[i]} · cLogP ${pts.clogp[i]} · 군집 ${pts.cluster[i]}`
+  );
+
+  const trace = {
+    type: "scattergl",
+    mode: "markers",
+    x: pts.x,
+    y: pts.y,
+    marker: {
+      size: pts.x.length > 6000 ? 4 : 6,
+      color: colors,
+      opacity: 0.8,
+      line: { width: 0 },
+    },
+    text: hover,
+    hovertemplate: "%{text}<extra></extra>",
+    // Stated rather than left to plotly's defaults, because a shift-click
+    // selection has to look the same as a lassoed one.
+    selected: { marker: { opacity: 1 } },
+    unselected: { marker: { opacity: 0.15 } },
+    selectedpoints: state.selection.size ? [...state.selection] : null,
+  };
+
+  const view = currentView();
+
+  const layout = {
+    dragmode: "lasso",
+    margin: { l: 8, r: 8, t: 8, b: 8 },
+    // autorange is stated rather than left out: a new node is a fresh
+    // placement with its own coordinate range, so a zoom left over from the
+    // previous node would open the new map on an empty patch. Redrawing the
+    // same node puts the view back instead -- see currentView().
+    xaxis: view
+      ? { visible: false, range: view.x, autorange: false }
+      : { visible: false, autorange: true },
+    yaxis: view
+      ? { visible: false, range: view.y, autorange: false, scaleanchor: "x" }
+      : { visible: false, autorange: true, scaleanchor: "x" },
+    showlegend: false,
+    plot_bgcolor: "#fff",
+    paper_bgcolor: "#fff",
+    hoverlabel: { font: { size: 12 } },
+  };
+
+  Plotly.react("plot", [trace], layout, {
+    responsive: true,
+    displaylogo: false,
+    // autoScale2d is the "fit everything" button. Zooming into an empty patch
+    // is easy and looks exactly like a broken plot, so leave the way back.
+    // Wheel zoom. Plotly calls preventDefault on the wheel event while the
+    // cursor is over the plot, so the page behind it does not scroll away.
+    scrollZoom: true,
+    modeBarButtonsToRemove: ["toggleSpikelines"],
+  });
+  drawnNode = state.nodeId;
+
+  const plot = $("plot");
+  ["plotly_selected", "plotly_deselect", "plotly_click", "plotly_doubleclick"].forEach(
+    (e) => plot.removeAllListeners?.(e)
+  );
+
+  /* Plotly's own double-click reset goes back to whatever range was in force
+   * when the plot was last built -- and a recolour rebuilds it at the current
+   * zoom, so after one recolour the gesture stops zooming out. Ask for
+   * autorange instead: it always fits everything, whatever happened before. */
+  plot.on("plotly_doubleclick", () => {
+    Plotly.relayout(plot, { "xaxis.autorange": true, "yaxis.autorange": true });
+  });
+
+  plot.on("plotly_selected", (ev) => {
+    if (applying) return;   // our own restyle, not a gesture
+    // Plotly fires this with no payload when a selection is cleared.
+    if (!ev || !ev.points) return shiftHeld ? undefined : clearSelection();
+    const idx = ev.points.map((p) => p.pointIndex ?? p.pointNumber);
+    const poly = lassoPolygon(ev);
+    if (withShift(ev) && state.selection.size) {
+      // A second region instead of a replacement. Plotly may already have
+      // unioned them itself; taking the union again is harmless either way.
+      setSelection([...state.selection, ...idx], {
+        polygon: state.polygon || poly,
+        partial: true,
+        toggles: state.clickToggles,
+      });
+    } else {
+      setSelection(idx, { polygon: poly });
+    }
+  });
+
+  plot.on("plotly_click", (ev) => {
+    const pt = ev && ev.points && ev.points[0];
+    // A plain click stays a no-op: in lasso mode it is how you start a drag,
+    // and wiping the selection on a mis-click is expensive to redo.
+    if (applying || !pt || !withShift(ev)) return;
+    const i = pt.pointIndex ?? pt.pointNumber;
+    const next = new Set(state.selection);
+    next.has(i) ? next.delete(i) : next.add(i);
+    setSelection(next, {
+      polygon: state.polygon,
+      partial: state.polygon !== null,
+      toggles: state.clickToggles + 1,
+    });
+  });
+
+  /* A click with no drag counts as "clear the selection" in box/lasso mode,
+   * and plotly fires it *before* plotly_click -- so without this guard a
+   * shift-click would wipe the lassoed region and then add its one point to
+   * the empty set. Measured, not guessed: it is what happened. */
+  plot.on("plotly_deselect", () => {
+    if (!applying && !shiftHeld) clearSelection();
+  });
+}
+
+function lassoPolygon(ev) {
+  if (ev.lassoPoints && ev.lassoPoints.x) {
+    return ev.lassoPoints.x.map((x, i) => [x, ev.lassoPoints.y[i]]);
+  }
+  if (ev.range && ev.range.x) {
+    const [x0, x1] = ev.range.x, [y0, y1] = ev.range.y;
+    return [[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+  }
+  return null;
+}
+
+/* ------------------------------------------------------------- selection */
+
+function setSelection(indices, { polygon = null, partial = false, toggles = 0 } = {}) {
+  state.selection = new Set(indices);
+  state.polygon = polygon;
+  state.polygonPartial = partial;
+  state.clickToggles = toggles;
+  applySelection();
+}
+
+const clearSelection = () => setSelection([]);
+
+function applySelection() {
+  const n = state.selection.size;
+  $("narrowBtn").disabled = n === 0;
+  $("clearSelBtn").disabled = n === 0;
+
+  /* Drive plotly's highlight from our Set. A lasso drag sets selectedpoints
+   * internally but a shift-click does not, so state it every time rather than
+   * trusting whichever gesture happened last. */
+  const gd = $("plot");
+  if (gd && gd.data && gd.data.length) {
+    const pts = n ? [...state.selection] : null;
+    /* While a drawn selection shape is still on the plot, plotly re-derives
+     * selectedpoints from that shape and overwrites whatever we restyle --
+     * so a shift-clicked point would be in the selection but not highlighted,
+     * and a cleared selection would leave every point dimmed behind a stale
+     * outline. Dropping the shape hands the highlight back to us. The outline
+     * goes with it, which is the right trade: an outline that no longer
+     * matches the selection is worse than no outline.
+     *
+     * A plain lasso result keeps its shape -- there plotly is right and the
+     * outline is worth having. */
+    const shaped = (gd.layout.selections || []).length > 0;
+    const takeOver = shaped && (state.polygonPartial || n === 0);
+    applying = true;
+    const step = takeOver
+      ? Plotly.relayout(gd, { selections: [] })
+      : Promise.resolve();
+    step
+      .then(() => Plotly.restyle(gd, { selectedpoints: [pts] }))
+      .finally(() => { applying = false; });
+  }
+
+  const note = $("selnote");
+  note.classList.toggle("active", n > 0);
+  note.textContent = n
+    ? `${describeSelection(n)} — ‘선택 영역으로 좁히기’를 누르면 다음 단계가 만들어집니다.`
+    : "올가미(lasso)로 영역을 드래그하세요. shift+클릭으로 화합물을 하나씩 더하거나 뺄 수 있고, shift+드래그로 영역을 덧붙일 수 있습니다. 휠로 확대·축소, 더블클릭으로 전체 보기.  권장 경로는 물성·모이어티 → 표적 → (좁아진 뒤) 질환입니다. 질환을 먼저 보려면 약물층만으로 제한하세요 — 적응증 주석은 그 층에만 있습니다.";
+}
+
+function describeSelection(n) {
+  const total = n.toLocaleString();
+  if (!state.clickToggles) return `영역 선택: ${total}개`;
+  if (!state.polygon) return `개별 선택: ${total}개`;
+  return `선택: ${total}개 (올가미 + 개별 ${state.clickToggles.toLocaleString()}회 조정)`;
+}
+
+function selectionHow() {
+  if (!state.clickToggles) return "드래그 선택";
+  return state.polygon ? "드래그 + 개별 선택" : "개별 선택";
+}
+
+/* ---------------------------------------------------------------- tables */
+
+function renderTable(rows, container) {
+  const el = $(container);
+  if (!rows || !rows.length) {
+    el.innerHTML = '<div class="muted">표시할 내용이 없습니다.</div>';
+    return;
+  }
+  const cols = Object.keys(rows[0]);
+  const head = cols.map((c) => `<th>${escapeHtml(c)}</th>`).join("");
+  const body = rows.map((r) => {
+    const special = r.cluster === NOISE || r.cluster === UNCOVERED;
+    const tds = cols.map((c) => {
+      const v = r[c];
+      const num = typeof v === "number";
+      return `<td class="${num ? "num" : ""}">${escapeHtml(v === null ? "" : v)}</td>`;
+    }).join("");
+    return `<tr class="${special ? "special" : ""}">${tds}</tr>`;
+  }).join("");
+  el.innerHTML = `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+}
+
+/* ----------------------------------------------------------------- views */
+
+async function loadNode(nodeId) {
+  state.nodeId = nodeId;
+  const base = `/api/sessions/${state.sessionId}/nodes/${nodeId}`;
+  const [node, points] = await Promise.all([api(base), api(`${base}/points`)]);
+  state.node = node;
+  state.points = points;
+
+  $("breadcrumb").textContent = node.breadcrumb;
+  $("domainSelect").value = node.domain;
+  $("backBtn").disabled = !node.parent_id;
+  clearSelection();
+  drawPlot(points);
+  renderStatus(node);
+  remember();
+  await Promise.all([
+    refreshSessionViews(),
+    refreshPanels(nodeId),
+    loadDomainCoverage(nodeId),
+  ]);
+}
+
+/* Coverage is a separate request on purpose. It featurises every domain, which
+ * is seconds even at 73,864 compounds, but the map should already be on screen
+ * by then -- so it must not sit in front of the first paint. A failure here
+ * leaves the picker unlabelled rather than breaking the node. */
+async function loadDomainCoverage(nodeId) {
+  state.domainCoverage = null;
+  state.drugLayer = null;
+  renderDomainOptions();
+  try {
+    const cov = await api(
+      `/api/sessions/${state.sessionId}/nodes/${nodeId}/domain-coverage`
+    );
+    if (state.nodeId !== nodeId) return;   // user moved on while we waited
+    state.domainCoverage = cov;
+    state.drugLayer = cov.drug_layer;
+  } catch (err) {
+    console.warn("domain coverage unavailable", err);
+  }
+  renderDomainOptions();
+}
+
+function coverageOf(name) {
+  if (!state.domainCoverage) return null;
+  return state.domainCoverage.domains.find((d) => d.name === name) || null;
+}
+
+/* Write the coverage into the option labels, and the warning beside them.
+ * Thresholds are deliberately blunt: under 15% the next map is mostly the
+ * uncovered band, 15-40% is thin enough to mislead. They are a nudge, never a
+ * block -- a 7.6% disease map is still the honest picture of that selection. */
+function renderDomainOptions() {
+  const sel = $("domainSelect");
+  const chosen = sel.value;
+  sel.innerHTML = state.domains
+    .map((d) => {
+      const c = coverageOf(d.name);
+      const suffix = c ? `  ·  ${(c.fraction * 100).toFixed(1)}%` : "";
+      return `<option value="${d.name}" title="${escapeHtml(d.description)}">` +
+             `${escapeHtml(d.label)} (${d.name})${suffix}</option>`;
+    })
+    .join("");
+  sel.value = chosen || (state.node ? state.node.domain : "");
+  renderDomainNote();
+
+  const node = state.node;
+  const drug = state.drugLayer;
+  $("drugBtn").disabled = !(node && drug !== null && drug > 0 && drug < node.n);
+  if (node && drug !== null) {
+    $("drugBtn").textContent =
+      drug < node.n ? `약물층만 (${drug.toLocaleString()})` : "약물층만";
+  }
+  const own = node ? coverageOf(node.domain) : null;
+  $("annotatedBtn").disabled =
+    !(node && own && own.covered > 0 && own.covered < node.n);
+  $("annotatedBtn").textContent =
+    own && own.covered < (node ? node.n : 0)
+      ? `주석 있는 것만 (${own.covered.toLocaleString()})`
+      : "주석 있는 것만";
+}
+
+function renderDomainNote() {
+  const el = $("domcov");
+  const target = $("domainSelect").value;
+  const node = state.node;
+  if (!node || !state.domainCoverage || target === node.domain) {
+    el.textContent = "";
+    el.className = "muted small";
+    return;
+  }
+  const c = coverageOf(target);
+  if (!c) { el.textContent = ""; return; }
+  const pct = (c.fraction * 100).toFixed(1);
+  const head =
+    `전환하면 ${c.covered.toLocaleString()}/${node.n.toLocaleString()}개 (${pct}%)`;
+  // "만 ... 오릅니다" reads as a complaint, so it is only right when the
+  // number is one: at 98.4% the same sentence sounds like a warning about
+  // nothing.
+  el.textContent =
+    c.fraction < 0.4
+      ? `${head}만 지도에 오릅니다 — 나머지는 미커버 띠로 갑니다`
+      : `${head}가 지도에 오릅니다`;
+  el.className =
+    c.fraction < 0.15 ? "danger small" : c.fraction < 0.4 ? "warn small" : "muted small";
+}
+
+function renderStatus(node) {
+  const bits = [
+    `<b>${escapeHtml(node.domain_label)}</b>`,
+    `${node.n.toLocaleString()}개 화합물`,
+    `${node.clusters}군집`,
+    `배치 ${escapeHtml(node.embed_method)}`,
+    `군집 ${escapeHtml(node.cluster_method)}`,
+  ];
+  if (node.noise) bits.push(`noise ${node.noise.toLocaleString()}개`);
+  if (node.n_covered < node.n) {
+    bits.push(
+      `<span class="warn">이 도메인에 데이터 있는 화합물 ` +
+      `${node.n_covered.toLocaleString()}/${node.n.toLocaleString()}</span>`
+    );
+  }
+  if (node.degenerate) bits.push(`<span class="danger">${escapeHtml(node.degenerate)}</span>`);
+  if (node.from_cache) bits.push(`<span class="muted">캐시에서 불러옴</span>`);
+  $("status").innerHTML = bits.join(" · ");
+}
+
+async function refreshSessionViews() {
+  const s = await api(`/api/sessions/${state.sessionId}`);
+  const sel = $("nodeSelect");
+  sel.innerHTML = s.nodes
+    .map((n) => `<option value="${n.node_id}">[${n.node_id}] ${escapeHtml(n.description)}</option>`)
+    .join("");
+  sel.value = state.nodeId;
+  $("treeText").textContent = s.tree_text;
+}
+
+async function refreshPanels(nodeId) {
+  const base = `/api/sessions/${state.sessionId}/nodes/${nodeId}`;
+  const [describe, clusters, compounds] = await Promise.all([
+    api(`${base}/describe`),
+    api(`${base}/clusters`),
+    api(`${base}/compounds?limit=200`),
+  ]);
+  renderTable(describe, "panel-describe");
+  renderTable(clusters, "panel-clusters");
+  renderTable(compounds, "panel-compounds");
+}
+
+/* --------------------------------------------------------------- actions */
+
+async function guarded(fn) {
+  try {
+    await fn();
+  } catch (err) {
+    toast(err.message, true);
+    console.error(err);
+  }
+}
+
+function wire() {
+  $("narrowBtn").onclick = () => guarded(async () => {
+    if (!state.selection.size) return;
+    const job = await post(`/api/sessions/${state.sessionId}/select`, {
+      node_id: state.nodeId,
+      point_indices: [...state.selection],
+      polygon: state.polygon,
+      polygon_partial: state.polygonPartial,
+      how: selectionHow(),
+    });
+    const newId = await awaitJob(job);
+    await loadNode(newId);
+    toast(`${newId} 생성 — ${state.node.n.toLocaleString()}개`);
+  });
+
+  $("clearSelBtn").onclick = () => clearSelection();
+
+  /* A filter is the same kind of move as a lasso -- fewer compounds, same
+   * domain, re-placed -- so it goes through the same job/await path and lands
+   * as its own node in the tree. */
+  const restrict = (kind, domain) => guarded(async () => {
+    const job = await post(`/api/sessions/${state.sessionId}/restrict`, {
+      node_id: state.nodeId, kind, domain: domain || null,
+    });
+    const newId = await awaitJob(job);
+    await loadNode(newId);
+    toast(`${newId} 생성 — ${state.node.n.toLocaleString()}개`);
+  });
+  $("drugBtn").onclick = () => restrict("drug");
+  $("annotatedBtn").onclick = () => restrict("annotated", state.node.domain);
+
+  /* Read the modifier off the mouse event itself, in the capture phase so it
+   * is set before plotly's own handlers run. Keyboard tracking alone is not
+   * enough -- a shift-click can carry shiftKey on the mouse event without any
+   * keydown reaching this window -- and plotly_deselect, which fires on
+   * mouseup before plotly_click, has to know. The listener goes here rather
+   * than in drawPlot because #plot outlives every re-render. */
+  ["mousedown", "mouseup"].forEach((t) =>
+    $("plot").addEventListener(t, (e) => { shiftHeld = e.shiftKey; }, true)
+  );
+
+  $("switchBtn").onclick = () => guarded(async () => {
+    const domain = $("domainSelect").value;
+    if (domain === state.node.domain) return toast("이미 같은 도메인입니다.", true);
+    const job = await post(`/api/sessions/${state.sessionId}/switch`, {
+      node_id: state.nodeId, domain,
+    });
+    const newId = await awaitJob(job);
+    await loadNode(newId);
+    toast(
+      `${newId} — ${josaRo(state.node.domain_label)} 재배치 ` +
+      `(${state.node.n.toLocaleString()}개 유지)`
+    );
+  });
+
+  $("backBtn").onclick = () => guarded(async () => {
+    if (state.node.parent_id) await loadNode(state.node.parent_id);
+  });
+
+  $("nodeSelect").onchange = (e) => guarded(() => loadNode(e.target.value));
+
+  $("domainSelect").onchange = () => renderDomainNote();
+
+  $("colorSelect").onchange = (e) => {
+    state.colorBy = e.target.value;
+    if (state.points) drawPlot(state.points);
+  };
+
+  $("saveBtn").onclick = () => guarded(async () => {
+    const res = await post(`/api/sessions/${state.sessionId}/save`, { name: "web" });
+    toast(`저장됨: ${res.path} (노드 ${res.nodes}개)`);
+  });
+
+  document.querySelectorAll(".tab").forEach((btn) => {
+    btn.onclick = () => {
+      document.querySelectorAll(".tab").forEach((b) => b.classList.remove("active"));
+      document.querySelectorAll(".panel").forEach((p) => p.classList.add("hidden"));
+      btn.classList.add("active");
+      $(`panel-${btn.dataset.tab}`).classList.remove("hidden");
+    };
+  });
+}
+
+/* ------------------------------------------------------------------ boot */
+
+/* Remember where we were, so a reload does not throw the exploration away.
+ * Sessions live in server memory, so a resume can legitimately fail (restart,
+ * eviction); that is not an error, it just means starting over. */
+const STORE_KEY = "chemspace.session";
+
+function remember() {
+  try {
+    localStorage.setItem(
+      STORE_KEY, JSON.stringify({ sessionId: state.sessionId, nodeId: state.nodeId })
+    );
+  } catch (_) { /* private mode, quota -- resuming is a convenience, not a feature */ }
+}
+
+async function tryResume() {
+  let saved;
+  try {
+    saved = JSON.parse(localStorage.getItem(STORE_KEY) || "null");
+  } catch (_) { return false; }
+  if (!saved || !saved.sessionId) return false;
+  try {
+    const s = await api(`/api/sessions/${saved.sessionId}`);
+    if (!s.nodes.length) return false;
+    state.sessionId = saved.sessionId;
+    const known = new Set(s.nodes.map((n) => n.node_id));
+    await loadNode(known.has(saved.nodeId) ? saved.nodeId : s.nodes[s.nodes.length - 1].node_id);
+    toast(`이전 세션을 이어받았습니다 (노드 ${s.nodes.length}개)`);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+async function boot() {
+  wire();
+  try {
+    const meta = await api("/api/meta");
+    state.domains = meta.domains;
+    $("meta").textContent =
+      `${meta.chembl_version} · ${meta.compounds.toLocaleString()}개 화합물 · 도메인 ${meta.domains.length}종`;
+    renderDomainOptions();
+
+    if (await tryResume()) return;
+
+    const { session_id } = await post("/api/sessions");
+    state.sessionId = session_id;
+
+    const job = await post(`/api/sessions/${session_id}/root`, { domain: "physchem", note: "전체 집합" });
+    const rootId = await awaitJob(job);
+    await loadNode(rootId);
+  } catch (err) {
+    showBusy(false);
+    toast(`시작 실패: ${err.message}`, true);
+    console.error(err);
+  }
+}
+
+boot();
