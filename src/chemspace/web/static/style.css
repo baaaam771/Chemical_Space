@@ -146,3 +146,52 @@ tr.special td { color: var(--muted); font-style: italic; }
 
 .warn { color: var(--warn); }
 .danger { color: var(--danger); }
+
+/* ---------------------------------------------------------------- 로그인 */
+
+/* The gate covers the application rather than living on its own URL. A
+   separate /login page would need the server to decide, per request, whether
+   to serve the page or redirect -- and the first screen of a single-page app
+   is already a fetch that can come back 401. Covering is one element and one
+   branch. */
+#gate {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg, #fff);
+}
+#gate.hidden { display: none; }
+
+#loginForm {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: min(340px, calc(100vw - 32px));
+  padding: 28px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+#loginForm h2 { margin: 0; font-size: 18px; }
+#loginForm p { margin: 0; }
+#loginForm label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--muted);
+}
+#loginForm input {
+  padding: 8px 10px;
+  font: inherit;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg, #fff);
+  color: inherit;
+}
+#loginForm button { padding: 9px; }
+#loginError:empty { display: none; }
+
+#whoami { margin-left: auto; }

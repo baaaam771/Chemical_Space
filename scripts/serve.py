@@ -23,6 +23,14 @@ def main() -> int:
         help="recompute every placement instead of reusing the disk cache",
     )
     ap.add_argument("--workers", type=int, default=2, help="placement threads")
+    ap.add_argument("--users", default="data/users.json", help="user file")
+    ap.add_argument(
+        "--secure-cookie",
+        action="store_true",
+        help="mark the login cookie Secure — set this once TLS is in front, "
+             "and not before: a Secure cookie is never sent over plain HTTP, "
+             "so on an internal http:// host it silently breaks every login",
+    )
     args = ap.parse_args()
 
     # Windows consoles default to a legacy code page, which turns the arrow in
@@ -67,6 +75,8 @@ def main() -> int:
         snapshot=args.snapshot,
         use_cache=not args.no_cache,
         max_workers=args.workers,
+        users_path=args.users,
+        secure_cookie=args.secure_cookie,
     )
     print(f"\n  chemspace → http://{args.host}:{args.port}\n", flush=True)
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")

@@ -36,6 +36,15 @@ __all__ = ["SessionStore", "StoredSession"]
 class StoredSession:
     session_id: str
     session: ExplorationSession
+    owner: str
+    """Who may read this tree.
+
+    A session id is a 12-hex-character handle the browser keeps, and before
+    there were users it was also the only thing standing between one person's
+    exploration and another's -- anyone holding an id could fetch the tree.
+    That was defensible for a single-user laptop and is not for a shared host,
+    so every lookup now checks the owner as well as the id.
+    """
     created_at: float = field(default_factory=time.time)
     touched_at: float = field(default_factory=time.time)
 
@@ -64,7 +73,7 @@ class SessionStore:
 
     # ------------------------------------------------------------------ CRUD
 
-    def create(self) -> StoredSession:
+    def create(self, owner: str) -> StoredSession:
         sid = uuid.uuid4().hex[:12]
         session = ExplorationSession(
             self.dataset,
@@ -75,17 +84,27 @@ class SessionStore:
             self.cluster_cfg,
             cache=self.cache,
         )
-        stored = StoredSession(session_id=sid, session=session)
+        stored = StoredSession(session_id=sid, session=session, owner=owner)
         with self._lock:
             self._sessions[sid] = stored
             self._evict()
-        log.info("session %s created (%d live)", sid, len(self._sessions))
+        log.info("session %s created for %s (%d live)", sid, owner, len(self._sessions))
         return stored
 
-    def get(self, session_id: str) -> StoredSession | None:
+    def get(self, session_id: str, owner: str | None = None) -> StoredSession | None:
+        """The session, or ``None`` if it is missing **or not ``owner``'s**.
+
+        Both cases return ``None`` rather than distinguishing them, so the id
+        space cannot be probed for which sessions exist.
+        """
         stored = self._sessions.get(session_id)
-        if stored:
-            stored.touch()
+        if stored is None:
+            return None
+        if owner is not None and stored.owner != owner:
+            log.warning("session %s requested by %s, owned by %s",
+                        session_id, owner, stored.owner)
+            return None
+        stored.touch()
         return stored
 
     def _evict(self) -> None:

@@ -1023,3 +1023,79 @@ def test_a_filter_node_survives_a_save_and_load(session, tmp_path):
     assert restored.origin.kind == "filter"
     assert restored.origin.detail["filter"] == "drug"
     assert "약물층만 남긴" in back.breadcrumb(node.node_id)
+
+
+# ------------------------------------------------------------------- 사용자
+
+
+def _store(tmp_path):
+    from chemspace.web.auth import UserStore
+
+    return UserStore(tmp_path / "users.json", tmp_path / "secret")
+
+
+def test_names_that_could_escape_a_directory_are_not_names(tmp_path):
+    """The grammar closes the hole, not a check somewhere downstream.
+
+    The old save-name pattern allowed dots, so ``..`` was a legal name and the
+    save path left the sessions directory. Dots are gone from the grammar.
+    """
+    from chemspace.web.auth import valid_name
+
+    for bad in ("..", ".", "a.b", "a/b", "a\b", "", " x", "x" * 33, "-x", "_x"):
+        assert not valid_name(bad), f"{bad!r} should not be a name"
+    for good in ("alice", "a", "user_1", "run-2", "A9"):
+        assert valid_name(good), f"{good!r} should be a name"
+
+
+def test_safe_subdir_refuses_to_leave_its_root(tmp_path):
+    from chemspace.web.auth import AuthError, safe_subdir
+
+    root = tmp_path / "sessions"
+    root.mkdir()
+    assert safe_subdir(root, "alice", "run1") == (root / "alice" / "run1").resolve()
+    for parts in (("..",), ("alice", ".."), ("..", "..", "etc")):
+        with pytest.raises(AuthError):
+            safe_subdir(root, *parts)
+
+
+def test_a_password_is_never_stored_in_the_clear(tmp_path):
+    us = _store(tmp_path)
+    us.add("alice", "correct-horse-battery")
+    blob = (tmp_path / "users.json").read_text(encoding="utf-8")
+    assert "correct-horse-battery" not in blob
+    assert us.check("alice", "correct-horse-battery")
+    assert not us.check("alice", "correct-horse-batterz")
+
+
+def test_short_passwords_are_refused(tmp_path):
+    from chemspace.web.auth import AuthError
+
+    with pytest.raises(AuthError):
+        _store(tmp_path).add("alice", "short")
+
+
+def test_a_cookie_cannot_be_given_a_later_expiry(tmp_path):
+    """The expiry is inside the signature, not beside it."""
+    us = _store(tmp_path)
+    us.add("alice", "correct-horse-battery")
+    token = us.issue("alice", ttl=60)
+    name, expiry, sig = token.split(".", 2)
+    assert us.identify(token) == "alice"
+    assert us.identify(f"{name}.{int(expiry) + 86400}.{sig}") is None
+
+
+def test_an_expired_cookie_is_not_a_login(tmp_path):
+    us = _store(tmp_path)
+    us.add("alice", "correct-horse-battery")
+    assert us.identify(us.issue("alice", ttl=-1)) is None
+
+
+def test_a_cookie_signed_with_another_secret_is_not_a_login(tmp_path):
+    """Deleting the secret file logs everybody out -- the revoke-all switch."""
+    us = _store(tmp_path)
+    us.add("alice", "correct-horse-battery")
+    token = us.issue("alice")
+    assert us.identify(token) == "alice"
+    (tmp_path / "secret").unlink()
+    assert us.identify(token) is None

@@ -68,6 +68,13 @@ async function api(path, options) {
       const body = await res.json();
       if (body.detail) msg = typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail);
     } catch (_) { /* keep the status line */ }
+    /* A cookie that ran out mid-session is not an error to report, it is a
+     * login to ask for. Without this the page would show "로그인이 필요합니다"
+     * in a toast and otherwise sit there, looking broken. */
+    if (res.status === 401 && !path.endsWith("/api/login")) {
+      showGate();
+      throw new Error("로그인이 만료되었습니다. 다시 로그인하세요.");
+    }
     throw new Error(msg);
   }
   return res.json();
@@ -625,8 +632,15 @@ function wire() {
   };
 
   $("saveBtn").onclick = () => guarded(async () => {
-    const res = await post(`/api/sessions/${state.sessionId}/save`, { name: "web" });
-    toast(`저장됨: ${res.path} (노드 ${res.nodes}개)`);
+    /* Ask for a name. It used to send "web" for everybody, which on a shared
+     * server meant the second person to save destroyed the first person's
+     * tree -- same path, no warning. Saves now live under the logged-in
+     * user, so a name only has to be unique to that person. */
+    const suggested = `run-${new Date().toISOString().slice(0, 10).replace(/-/g, "")}`;
+    const name = prompt("저장 이름 (영문·숫자·_·-)", suggested);
+    if (name === null) return;
+    const res = await post(`/api/sessions/${state.sessionId}/save`, { name: name.trim() });
+    toast(`저장됨: ${res.user}/${res.name} (노드 ${res.nodes}개)`);
   });
 
   document.querySelectorAll(".tab").forEach((btn) => {
@@ -673,23 +687,95 @@ async function tryResume() {
   }
 }
 
+/* ---------------------------------------------------------------- 로그인 */
+
+function showGate(message) {
+  $("gate").classList.remove("hidden");
+  $("loginError").textContent = message || "";
+  const name = $("loginName");
+  if (name && !name.value) name.focus();
+}
+
+function hideGate() {
+  $("gate").classList.add("hidden");
+  $("loginPassword").value = "";
+  $("loginError").textContent = "";
+}
+
+function wireLogin() {
+  $("loginForm").onsubmit = async (ev) => {
+    ev.preventDefault();
+    const btn = $("loginBtn");
+    btn.disabled = true;
+    try {
+      const { user } = await post("/api/login", {
+        name: $("loginName").value.trim(),
+        password: $("loginPassword").value,
+      });
+      hideGate();
+      $("whoami").textContent = user;
+      await startSession();
+    } catch (err) {
+      $("loginError").textContent = err.message;
+      $("loginPassword").value = "";
+      $("loginPassword").focus();
+    } finally {
+      btn.disabled = false;
+    }
+  };
+
+  $("logoutBtn").onclick = () => guarded(async () => {
+    await post("/api/logout");
+    /* Drop the remembered node too: the next person at this browser must not
+     * land on someone else's exploration, and the ids would 404 for them
+     * anyway now that sessions are owned. */
+    try { localStorage.removeItem(STORE_KEY); } catch (_) {}
+    state.sessionId = null;
+    state.nodeId = null;
+    $("whoami").textContent = "";
+    showGate("로그아웃했습니다.");
+  });
+}
+
+/* Everything after a successful login: resume what this browser was doing,
+ * or place the root. Split out of boot() because logging in again has to run
+ * it without reloading the page. */
+async function startSession() {
+  const meta = await api("/api/meta");
+  state.domains = meta.domains;
+  $("meta").textContent =
+    `${meta.chembl_version} · ${meta.compounds.toLocaleString()}개 화합물 · 도메인 ${meta.domains.length}종`;
+  renderDomainOptions();
+
+  if (await tryResume()) return;
+
+  const { session_id } = await post("/api/sessions");
+  state.sessionId = session_id;
+
+  const job = await post(`/api/sessions/${session_id}/root`, { domain: "physchem", note: "전체 집합" });
+  const rootId = await awaitJob(job);
+  await loadNode(rootId);
+}
+
 async function boot() {
   wire();
+  wireLogin();
+
+  /* Ask who we are before anything else. A valid cookie from a previous visit
+   * means the page can go straight to the map; a 401 is the normal first
+   * visit, not a failure, so it raises the gate instead of a red toast. */
+  let user = null;
   try {
-    const meta = await api("/api/meta");
-    state.domains = meta.domains;
-    $("meta").textContent =
-      `${meta.chembl_version} · ${meta.compounds.toLocaleString()}개 화합물 · 도메인 ${meta.domains.length}종`;
-    renderDomainOptions();
+    ({ user } = await api("/api/me"));
+  } catch (_) {
+    showGate();
+    return;
+  }
+  $("whoami").textContent = user;
+  hideGate();
 
-    if (await tryResume()) return;
-
-    const { session_id } = await post("/api/sessions");
-    state.sessionId = session_id;
-
-    const job = await post(`/api/sessions/${session_id}/root`, { domain: "physchem", note: "전체 집합" });
-    const rootId = await awaitJob(job);
-    await loadNode(rootId);
+  try {
+    await startSession();
   } catch (err) {
     showBusy(false);
     toast(`시작 실패: ${err.message}`, true);

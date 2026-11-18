@@ -16,3 +16,9 @@ data/*
 !data/.gitkeep
 
 *.parquet
+
+# Credentials, even hashed ones, and the key that signs login cookies.
+# These are per-deployment: the server generates the secret on first run and
+# the user file is built with scripts/manage_users.py.
+data/users.json
+data/cookie_secret

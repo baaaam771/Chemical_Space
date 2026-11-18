@@ -17,13 +17,21 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from chemspace.data.chembl import resolve_data_path
 from chemspace.placement import NOISE, UNCOVERED
+from chemspace.web.auth import (
+    COOKIE_NAME,
+    SESSION_TTL,
+    AuthError,
+    UserStore,
+    safe_subdir,
+    valid_name,
+)
 from chemspace.session.filters import FILTERS, drug_layer_mask, resolve as resolve_filter
 from chemspace.session.tree import Node
 from chemspace.web.jobs import JobRunner
@@ -71,7 +79,15 @@ class SwitchRequest(BaseModel):
 
 
 class SaveRequest(BaseModel):
-    name: str = Field(default="web", pattern=r"^[A-Za-z0-9._-]{1,64}$")
+    # No dots, so ".." is not a legal name -- the old pattern allowed it and a
+    # save could be aimed outside the sessions directory. The path is also
+    # checked for containment when it is built; see auth.safe_subdir.
+    name: str = Field(default="session", pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$")
+
+
+class LoginRequest(BaseModel):
+    name: str
+    password: str
 
 
 # ------------------------------------------------------------- serialisation
@@ -144,7 +160,26 @@ def create_app(
     snapshot: str | Path | None = None,
     use_cache: bool = True,
     max_workers: int = 2,
+    users_path: str | Path = "data/users.json",
+    secret_path: str | Path = "data/cookie_secret",
+    secure_cookie: bool = False,
+    require_users: bool = True,
 ) -> FastAPI:
+    users = UserStore(
+        resolve_data_path(users_path), resolve_data_path(secret_path)
+    )
+    if require_users and not len(users):
+        # Refusing to start is the safe default. The alternative -- running
+        # open until somebody remembers to add a user -- is the state that
+        # ships to a server and stays there.
+        raise SystemExit(
+            chr(10).join((
+                "",
+                f"  등록된 사용자가 없습니다 ({users.users_path}).",
+                "  먼저 만드세요: python scripts/manage_users.py add <이름>",
+                "",
+            ))
+        )
     store = SessionStore(snapshot=snapshot, use_cache=use_cache)
     runner = JobRunner(max_workers=max_workers)
 
@@ -156,9 +191,37 @@ def create_app(
     app = FastAPI(title="chemspace", version="0.1.0", lifespan=lifespan)
     app.state.store = store
     app.state.runner = runner
+    app.state.users = users
 
-    def need(session_id: str):
-        stored = store.get(session_id)
+    #: Reachable without a cookie. Everything else is closed.
+    #:
+    #: An allow-list in one middleware rather than a dependency on each route:
+    #: a route added later is protected by default, and the way to open one is
+    #: to name it here, deliberately, in the file where the rule lives. The
+    #: opposite arrangement -- guard each endpoint -- fails the first time
+    #: somebody adds a route and forgets.
+    OPEN_PATHS = {"/api/login", "/api/health", "/login", "/"}
+
+    @app.middleware("http")
+    async def require_login(request: Request, call_next):
+        path = request.url.path
+        if path in OPEN_PATHS or path.startswith("/static/") or path.startswith("/docs"):
+            return await call_next(request)
+        user = users.identify(request.cookies.get(COOKIE_NAME))
+        if user is None:
+            return JSONResponse({"detail": "로그인이 필요합니다"}, status_code=401)
+        request.state.user = user
+        return await call_next(request)
+
+    def current_user(request: Request) -> str:
+        """The logged-in user, trusting only what the middleware established."""
+        user = getattr(request.state, "user", None)
+        if user is None:  # pragma: no cover - middleware guarantees this
+            raise HTTPException(401, "로그인이 필요합니다")
+        return user
+
+    def need(session_id: str, request: Request):
+        stored = store.get(session_id, owner=current_user(request))
         if stored is None:
             raise HTTPException(404, f"no session {session_id} (it may have expired)")
         return stored.session
@@ -191,16 +254,53 @@ def create_app(
     def coverage():
         return table_records(store.dataset.coverage())
 
+    # ------------------------------------------------------------- 로그인
+
+    @app.get("/api/health")
+    def health():
+        """Open on purpose: a load balancer or a colleague checking the host
+        should not need an account to learn that the process is up. It says
+        nothing about the data."""
+        return {"ok": True, "users": len(users)}
+
+    @app.post("/api/login")
+    def login(req: LoginRequest, response: Response):
+        # One message for every failure. "No such user" and "wrong password"
+        # told apart would turn the login form into a way to find out who has
+        # an account here.
+        if not valid_name(req.name) or not users.check(req.name, req.password):
+            log.warning("failed login for %r", req.name[:32])
+            raise HTTPException(401, "이름 또는 비밀번호가 맞지 않습니다")
+        response.set_cookie(
+            COOKIE_NAME,
+            users.issue(req.name),
+            max_age=SESSION_TTL,
+            httponly=True,      # page scripts cannot read it
+            samesite="lax",     # another site cannot ride it
+            secure=secure_cookie,
+        )
+        log.info("login: %s", req.name)
+        return {"user": req.name}
+
+    @app.post("/api/logout")
+    def logout(response: Response):
+        response.delete_cookie(COOKIE_NAME, httponly=True, samesite="lax")
+        return {"ok": True}
+
+    @app.get("/api/me")
+    def me(request: Request):
+        return {"user": current_user(request)}
+
     # ------------------------------------------------------------- sessions
 
     @app.post("/api/sessions")
-    def create_session():
-        stored = store.create()
+    def create_session(request: Request):
+        stored = store.create(owner=current_user(request))
         return {"session_id": stored.session_id}
 
     @app.get("/api/sessions/{session_id}")
-    def get_session(session_id: str):
-        session = need(session_id)
+    def get_session(session_id: str, request: Request):
+        session = need(session_id, request)
         return {
             "session_id": session_id,
             "root_ids": session.root_ids,
@@ -209,18 +309,46 @@ def create_app(
         }
 
     @app.post("/api/sessions/{session_id}/save")
-    def save_session(session_id: str, req: SaveRequest):
-        session = need(session_id)
+    def save_session(session_id: str, req: SaveRequest, request: Request):
+        session = need(session_id, request)
         if not session.nodes:
             raise HTTPException(400, "nothing to save yet")
-        out = session.save(resolve_data_path(f"data/sessions/{req.name}"))
-        return {"path": str(out), "nodes": len(session.nodes)}
+        # The user name is part of the path, so two people pressing 저장 with
+        # the same name write to different places. Before this every browser
+        # sent "web" and the second save overwrote the first one's tree.
+        user = current_user(request)
+        root = resolve_data_path("data/sessions")
+        root.mkdir(parents=True, exist_ok=True)
+        try:
+            target = safe_subdir(root, user, req.name)
+        except AuthError as exc:
+            raise HTTPException(400, str(exc)) from None
+        out = session.save(target)
+        return {"path": str(out), "name": req.name, "user": user,
+                "nodes": len(session.nodes)}
+
+    @app.get("/api/saves")
+    def list_saves(request: Request):
+        """This user's saved trees. Only this user's -- the directory listing
+        is scoped to their own folder, so the endpoint cannot be used to see
+        who else works here."""
+        user = current_user(request)
+        root = resolve_data_path("data/sessions") / user
+        if not root.exists():
+            return []
+        saves = [
+            {"name": d.name,
+             "nodes": len(list((d / "placements").glob("*.npz")))}
+            for d in root.iterdir()
+            if (d / "session.json").exists()
+        ]
+        return sorted(saves, key=lambda r: r["name"])
 
     # --------------------------------------------------------------- moves
 
     @app.post("/api/sessions/{session_id}/root")
-    def make_root(session_id: str, req: RootRequest):
-        session = need(session_id)
+    def make_root(session_id: str, req: RootRequest, request: Request):
+        session = need(session_id, request)
         if req.domain not in session.domains:
             raise HTTPException(400, f"unknown domain {req.domain}")
         n = len(store.dataset.compounds)
@@ -232,8 +360,8 @@ def create_app(
         return job.as_dict()
 
     @app.post("/api/sessions/{session_id}/select")
-    def select(session_id: str, req: SelectRequest):
-        session = need(session_id)
+    def select(session_id: str, req: SelectRequest, request: Request):
+        session = need(session_id, request)
         parent = need_node(session, req.node_id)
         given = [x is not None for x in (req.point_indices, req.clusters)]
         if sum(given) != 1:
@@ -259,8 +387,8 @@ def create_app(
         return job.as_dict()
 
     @app.post("/api/sessions/{session_id}/restrict")
-    def restrict(session_id: str, req: RestrictRequest):
-        session = need(session_id)
+    def restrict(session_id: str, req: RestrictRequest, request: Request):
+        session = need(session_id, request)
         node = need_node(session, req.node_id)
         try:
             f = resolve_filter(req.kind)
@@ -293,8 +421,8 @@ def create_app(
         return job.as_dict()
 
     @app.post("/api/sessions/{session_id}/switch")
-    def switch(session_id: str, req: SwitchRequest):
-        session = need(session_id)
+    def switch(session_id: str, req: SwitchRequest, request: Request):
+        session = need(session_id, request)
         node = need_node(session, req.node_id)
         if req.domain not in session.domains:
             raise HTTPException(400, f"unknown domain {req.domain}")
@@ -318,8 +446,8 @@ def create_app(
     # --------------------------------------------------------------- nodes
 
     @app.get("/api/sessions/{session_id}/nodes/{node_id}")
-    def get_node(session_id: str, node_id: str):
-        session = need(session_id)
+    def get_node(session_id: str, node_id: str, request: Request):
+        session = need(session_id, request)
         node = need_node(session, node_id)
         return {
             **node_brief(session, node),
@@ -328,12 +456,12 @@ def create_app(
         }
 
     @app.get("/api/sessions/{session_id}/nodes/{node_id}/points")
-    def get_points(session_id: str, node_id: str):
-        session = need(session_id)
+    def get_points(session_id: str, node_id: str, request: Request):
+        session = need(session_id, request)
         return node_points(session, need_node(session, node_id))
 
     @app.get("/api/sessions/{session_id}/nodes/{node_id}/domain-coverage")
-    def get_domain_coverage(session_id: str, node_id: str):
+    def get_domain_coverage(session_id: str, node_id: str, request: Request):
         """How many of this node's compounds each domain actually covers.
 
         The UI labels its domain picker with this, so a switch that would land
@@ -341,7 +469,7 @@ def create_app(
         wait. Featurising every domain is seconds even at 73,864 compounds --
         it is the *placement* that is slow, and this does not place.
         """
-        session = need(session_id)
+        session = need(session_id, request)
         node = need_node(session, node_id)
         cov = session.domain_coverage(node_id)
         return {
@@ -360,20 +488,20 @@ def create_app(
         }
 
     @app.get("/api/sessions/{session_id}/nodes/{node_id}/clusters")
-    def get_clusters(session_id: str, node_id: str):
-        session = need(session_id)
+    def get_clusters(session_id: str, node_id: str, request: Request):
+        session = need(session_id, request)
         need_node(session, node_id)
         return table_records(session.cluster_table(node_id))
 
     @app.get("/api/sessions/{session_id}/nodes/{node_id}/describe")
-    def get_describe(session_id: str, node_id: str):
-        session = need(session_id)
+    def get_describe(session_id: str, node_id: str, request: Request):
+        session = need(session_id, request)
         need_node(session, node_id)
         return table_records(session.describe(node_id))
 
     @app.get("/api/sessions/{session_id}/nodes/{node_id}/compounds")
-    def get_compounds(session_id: str, node_id: str, limit: int = 200):
-        session = need(session_id)
+    def get_compounds(session_id: str, node_id: str, request: Request, limit: int = 200):
+        session = need(session_id, request)
         need_node(session, node_id)
         return frame_records(session, node_id, min(max(limit, 1), 2000))
 
