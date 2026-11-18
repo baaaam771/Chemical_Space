@@ -379,7 +379,7 @@ FileNotFoundError: no ChEMBL snapshot under .../data/cache
 Run: python scripts/fetch_chembl.py
 ```
 
-아래 [데이터 수집](#데이터-수집)을 한 번 돌리면 12,804개 스냅샷이 3~6분에 만들어집니다. 73,864개 스냅샷은 30 GB SQLite 릴리스가 필요하므로 [SQLite 릴리스](#약물층보다-넓게-가려면--sqlite-릴리스) 쪽을 보세요.
+아래 [데이터 수집](#데이터-수집)을 한 번 돌리면 12,804개 스냅샷이 약 25분에 만들어집니다 (실측). 73,864개 스냅샷은 30 GB SQLite 릴리스가 필요하므로 [SQLite 릴리스](#약물층보다-넓게-가려면--sqlite-릴리스) 쪽을 보세요.
 
 ## 데이터 수집
 
