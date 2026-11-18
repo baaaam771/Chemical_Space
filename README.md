@@ -541,6 +541,45 @@ post(`/api/sessions/${sessionId}/save`, { name: "web" })   // 고치기 전
 
 > **`--secure-cookie`는 TLS를 앞에 세운 뒤에 켜세요.** `Secure` 쿠키는 평문 HTTP로는 아예 전송되지 않아서, 사내 `http://` 호스트에서 켜면 로그인이 조용히 전부 실패합니다. 그래서 기본값이 꺼짐입니다.
 
+### 서버에 올리기 — 사내망
+
+실제로 올려서 돌리고 있는 구성입니다 (Rocky Linux 9.8, 64코어, **sudo 없는 계정**).
+
+```bash
+git clone https://github.com/baaaam771/Chemical_Space.git ~/chemspace
+cd ~/chemspace && uv sync --python 3.12 --all-extras && uv pip install -e .
+
+# 스냅샷은 다시 만들지 말고 복사하세요 — 24 MB입니다
+scp -r <작업PC>:…/data/cache/chembl_37_t50  data/cache/
+scp -r <작업PC>:…/data/cache/placements     data/cache/
+
+.venv/bin/python scripts/manage_users.py add <이름> --generate
+
+cp deploy/chemspace.service ~/.config/systemd/user/
+loginctl enable-linger                    # 로그아웃·재부팅 후에도 살아남게
+systemctl --user daemon-reload
+systemctl --user enable --now chemspace
+.venv/bin/python scripts/warm_cache.py    # 도메인 5개 루트 미리 계산
+```
+
+**sudo가 필요 없습니다.** `/etc/systemd/system`에 넣으려면 root가 필요하지만 `systemctl --user`는 아니고, `loginctl enable-linger`는 본인 계정에 대해 스스로 걸 수 있습니다. 그러면 ssh를 끊어도, 재부팅해도 서비스가 돌아옵니다.
+
+**스냅샷을 서버에서 다시 만들지 마세요.** 30 GB SQLite 릴리스를 다시 받고 빌드할 이유가 없습니다 — parquet 스냅샷 24 MB와 배치 캐시 720 KB를 복사하면 끝이고, **캐시를 같이 보내면 첫 접속자도 기다리지 않습니다.** 실제로 사내망 너머 브라우저에서 첫 지도까지 **1초**였습니다 (캐시 없이는 88초).
+
+막힌 자리 둘을 적어둡니다.
+
+- **`218/CAPABILITIES`로 서비스가 안 떴습니다.** `PrivateDevices`·`ProtectSystem`·`ProtectHome`을 넣었는데, 사용자 유닛에는 그 권한이 없습니다. 이 수준에서는 의미도 거의 없습니다 — 어차피 같은 계정으로 도니까요. 진짜 격리는 전용 계정 + 시스템 유닛이고 그건 root가 필요합니다. 지금은 `NoNewPrivileges`만 겁니다
+- **`journalctl --user -u chemspace`에 아무것도 없습니다.** 이 호스트에 사용자 저널이 영구 설정돼 있지 않습니다. 로그가 사라지는 서비스는 디버깅할 수 없으니 `data/chemspace.log`로 직접 씁니다 (로테이션은 직접 하세요)
+
+> **이 호스트는 방화벽이 꺼져 있습니다** (`firewall-cmd --state` → not running). `--host 0.0.0.0`은 알려준 사람뿐 아니라 **이 머신까지 경로가 닿는 전부**에게 열린다는 뜻입니다. 그게 아니라면 `127.0.0.1`로 두고 ssh 터널을 쓰세요.
+
+| | |
+|---|---|
+| 상태 | `systemctl --user status chemspace` |
+| 로그 | `tail -f ~/chemspace/data/chemspace.log` |
+| 재시작 | `systemctl --user restart chemspace` |
+| 중지 | `systemctl --user stop chemspace` |
+
 ### 선택 방법 세 가지를 섞을 수 있습니다
 
 | 조작 | 결과 |
@@ -646,6 +685,9 @@ scripts/
   serve.py         웹 UI 실행
   warm_cache.py    배포 후 캐시 예열
   manage_users.py  웹 UI 사용자 추가·변경·삭제
+
+deploy/
+  chemspace.service  systemd 사용자 유닛 (sudo 불필요)
   bench_placement.py  배치 비용이 n에 따라 어떻게 늘어나는지 (CPU / GPU)
   cluster_quality.py  군집이 의미 있는가 — 외부 라벨 일치 vs 귀무값 (--snapshot)
   tune_min_cluster.py 군집 세분도 — 좌표를 재사용해 규칙만 바꿔 가며 측정

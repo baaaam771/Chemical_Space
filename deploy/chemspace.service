@@ -1,0 +1,60 @@
+; A user service, not a system one.
+;
+; Installing under /etc/systemd/system needs root, and the host this was
+; written for gives the account no sudo. `systemctl --user` needs none, and
+; with `loginctl enable-linger <user>` -- which the user may run for
+; themselves -- it starts at boot and keeps running after every ssh session
+; closes. That covers what a system unit would have been for here.
+;
+;   install:  cp deploy/chemspace.service ~/.config/systemd/user/
+;             loginctl enable-linger
+;             systemctl --user daemon-reload
+;             systemctl --user enable --now chemspace
+;   logs:     journalctl --user -u chemspace -f
+;   restart:  systemctl --user restart chemspace
+;
+; Edit WorkingDirectory below if the checkout is not ~/chemspace.
+
+[Unit]
+Description=chemspace - iterative chemical space exploration
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/chemspace
+; --host 0.0.0.0 makes it reachable from the rest of the network. On a host
+; with no firewall running, that means everything able to route to this
+; machine, not just the people you told. Keep it 127.0.0.1 and use an ssh
+; tunnel if that is not what you want.
+ExecStart=%h/chemspace/.venv/bin/python scripts/serve.py --host 0.0.0.0 --port 8000 --workers 4
+Restart=on-failure
+RestartSec=5
+
+; The first request after a restart would otherwise pay for the dataset load,
+; so give the process room to come up before anything is expected of it.
+TimeoutStartSec=300
+
+; The only hardening a *user* unit can actually apply here.
+;
+; PrivateDevices, ProtectSystem and ProtectHome were in this file first and
+; the service would not start: systemd answered 218/CAPABILITIES, because
+; those directives need privileges a user manager does not have. They are
+; also close to pointless at this level -- the process runs as the same
+; account either way, with the same access to that account's files. Real
+; isolation means a system unit under its own user, which needs root.
+NoNewPrivileges=yes
+
+; Log to a file, not the journal.
+;
+; A user manager writes to the *user* journal, and on a host with no
+; persistent journal configured that is nowhere: `journalctl --user -u
+; chemspace` answered "No journal files were found" on the very first run
+; here. A service whose logs vanish is a service you cannot debug, so send
+; them somewhere that exists. Rotate it yourself or with logrotate -- this
+; appends forever.
+StandardOutput=append:%h/chemspace/data/chemspace.log
+StandardError=append:%h/chemspace/data/chemspace.log
+
+[Install]
+WantedBy=default.target
