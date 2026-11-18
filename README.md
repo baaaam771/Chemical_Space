@@ -357,14 +357,29 @@ ATC 라벨은 두 스냅샷에서 **같은 2,543개 / 2,544개 화합물**에 �
 ## 설치
 
 ```bash
-uv sync --python 3.12
+uv sync --python 3.12 --all-extras
 ```
 
 ```bash
 uv pip install -e .
 ```
 
+**`--all-extras`가 필요합니다.** 웹 서버(`fastapi`·`uvicorn`)와 테스트(`pytest`·`httpx`)가 선택 그룹에 있어서, 빼고 설치하면 엔진은 import되지만 `scripts/serve.py`가 `ModuleNotFoundError: uvicorn`으로 죽고 `pytest`도 없습니다. 새로 clone해서 실제로 밟아 본 지점입니다.
+
 > `uv sync`가 패키지를 비editable로 덮어쓸 수 있습니다. `import chemspace`가 실패하면 위 `uv pip install -e .`을 다시 실행하세요. 이후에는 `.venv\Scripts\python.exe`를 직접 쓰는 것이 안전합니다.
+
+> **윈도우 기준으로 적혀 있습니다.** 맥·리눅스에서는 아래 모든 명령의 `.venv\Scripts\python.exe`를 `.venv/bin/python`으로 바꿔 읽으세요. `.claude/launch.json`의 `runtimeExecutable`도 마찬가지입니다.
+
+### 새 PC에서 처음 받았다면
+
+저장소에는 **코드만** 있습니다. `data/`는 통째로 제외돼 있어서 clone 직후에는 스냅샷이 없고, `chemspace.load()`가 이렇게 멈춥니다.
+
+```
+FileNotFoundError: no ChEMBL snapshot under .../data/cache
+Run: python scripts/fetch_chembl.py
+```
+
+아래 [데이터 수집](#데이터-수집)을 한 번 돌리면 12,804개 스냅샷이 3~6분에 만들어집니다. 73,864개 스냅샷은 30 GB SQLite 릴리스가 필요하므로 [SQLite 릴리스](#약물층보다-넓게-가려면--sqlite-릴리스) 쪽을 보세요.
 
 ## 데이터 수집
 
