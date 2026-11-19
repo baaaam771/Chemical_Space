@@ -185,6 +185,11 @@ def test_compound_detail_returns_structure_fields(client):
     assert rec["smiles"]  # the hover card needs a structure string to draw
     for key in ("name", "modality", "mw", "clogp", "qed"):
         assert key in rec
+    # The detail modal reads these richer fields.
+    for key in ("props", "diseases", "areas", "targets", "families", "murcko_smiles"):
+        assert key in rec
+    assert isinstance(rec["props"], dict)
+    assert isinstance(rec["diseases"], list)
 
 
 def test_structure_svg_renders(client):

@@ -154,6 +154,22 @@ def table_records(df) -> list[dict]:
     return df.reset_index().replace({np.nan: ""}).astype(object).to_dict(orient="records")
 
 
+#: (label, column) pairs shown in the compound detail modal's value grid.
+_DETAIL_PROPS = (
+    ("MW", "mw"),
+    ("cLogP", "clogp"),
+    ("TPSA", "tpsa"),
+    ("QED", "qed"),
+    ("HBD", "hbd"),
+    ("HBA", "hba"),
+    ("RotB", "rotb"),
+    ("Fsp3", "fsp3"),
+    ("고리수", "ring_count"),
+    ("방향족고리", "aromatic_rings"),
+    ("중원자수", "heavy_atoms"),
+)
+
+
 def _clean(v) -> Any:
     """A JSON-safe builtin number: NaN/None -> null, else a rounded float.
 
@@ -177,14 +193,29 @@ def compound_record(dataset, chembl_id: str) -> dict | None:
     r = df.loc[chembl_id]
     name = r.get("pref_name")
     name = "" if name is None or (isinstance(name, float) and np.isnan(name)) else str(name)
+
+    props = {label: _clean(r.get(col)) for label, col in _DETAIL_PROPS if col in df.columns}
+
+    def _strip(t: str) -> str:
+        return t.split(":", 1)[1] if ":" in t else t
+
+    dterms = getattr(dataset, "disease_terms", {}).get(chembl_id, ())
+    tterms = getattr(dataset, "target_terms", {}).get(chembl_id, ())
     return {
         "chembl_id": chembl_id,
         "name": name,
         "smiles": str(r.get("canonical_smiles") or ""),
+        "murcko_smiles": str(r.get("murcko_smiles") or ""),
         "modality": str(r.get("modality") or ""),
+        # Back-compat flat keys (older callers); `props` is the full set.
         "mw": _clean(r.get("mw")),
         "clogp": _clean(r.get("clogp")),
         "qed": _clean(r.get("qed")),
+        "props": props,
+        "diseases": [_strip(t) for t in dterms if t.startswith(("MeSH:", "EFO:"))],
+        "areas": [_strip(t) for t in dterms if t.startswith("ATC:")],
+        "targets": [_strip(t) for t in tterms if t.startswith("TGT:")],
+        "families": sorted({_strip(t) for t in tterms if t.startswith("L1:")}),
     }
 
 

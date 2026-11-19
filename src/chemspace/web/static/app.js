@@ -215,6 +215,7 @@ function josaRo(word) {
  * depiction from /api/compound/<id>/structure.svg -- rendered by RDKit on the
  * server and cached, so the coordinate payload carries no SMILES per point. */
 let hoverHideTimer = null;
+let suppressDeselect = false;  // set by a point click so the deselect clear is skipped
 
 function hoverCardEl() {
   let el = $("hovercard");
@@ -283,6 +284,66 @@ function hideHoverCard() {
     el.hidden = true;
     el.dataset.id = "";
   }, 90);
+}
+
+/* --------------------------------------------------------- compound modal */
+
+/* Click a point (or a 화합물 row) to inspect one compound: a large structure
+ * plus every value and its disease / target annotations. The hover card is the
+ * glance; this is the full read. */
+async function openCompoundModal(cid) {
+  if (!cid) return;
+  const backdrop = $("cmodal-backdrop");
+  const box = $("cmodal");
+  box.innerHTML = '<div class="muted">불러오는 중…</div>';
+  backdrop.hidden = false;
+  try {
+    const rec = await api(`/api/compound/${encodeURIComponent(cid)}`);
+    box.innerHTML = renderCompoundDetail(rec);
+  } catch (e) {
+    box.innerHTML = `<div class="muted">불러오지 못했습니다: ${escapeHtml(cid)}</div>`;
+  }
+}
+
+function closeCompoundModal() {
+  const b = $("cmodal-backdrop");
+  if (b) b.hidden = true;
+}
+
+function renderCompoundDetail(r) {
+  const chips = (arr) =>
+    arr && arr.length
+      ? `<div class="cmodal-chips">${arr
+          .map((x) => `<span class="chip">${escapeHtml(x)}</span>`)
+          .join("")}</div>`
+      : '<div class="cmodal-empty">데이터 없음</div>';
+  const props = Object.entries(r.props || {})
+    .map(
+      ([k, v]) =>
+        `<div><div class="k">${escapeHtml(k)}</div>` +
+        `<div class="v">${v == null ? "–" : escapeHtml(String(v))}</div></div>`
+    )
+    .join("");
+  const sec = (title, body) => `<div class="cmodal-sec"><h4>${title}</h4>${body}</div>`;
+  return (
+    `<div class="cmodal-head">` +
+    `<img class="cmodal-struct" alt="" ` +
+    `src="/api/compound/${encodeURIComponent(r.chembl_id)}/structure.svg" ` +
+    `onerror="this.style.display='none'">` +
+    `<div class="cmodal-id"><h3>${escapeHtml(r.name || r.chembl_id)}</h3>` +
+    `<div class="sub">${escapeHtml(r.chembl_id)}` +
+    `${r.modality ? " · " + escapeHtml(r.modality) : ""}</div>` +
+    (r.smiles ? `<div class="smiles">${escapeHtml(r.smiles)}</div>` : "") +
+    `</div><button id="cmodal-close" title="닫기">×</button></div>` +
+    `<div class="cmodal-grid">${props}</div>` +
+    sec("질환 (적응증)", chips(r.diseases)) +
+    (r.areas && r.areas.length ? sec("치료영역 (ATC)", chips(r.areas)) : "") +
+    sec("표적 단백질", chips(r.targets)) +
+    (r.families && r.families.length ? sec("단백질 계열", chips(r.families)) : "") +
+    (r.murcko_smiles
+      ? sec("스캐폴드", `<div class="smiles">${escapeHtml(r.murcko_smiles)}</div>`)
+      : "")
+  );
 }
 
 /* ------------------------------------------------------------------ plot */
@@ -404,25 +465,40 @@ function drawPlot(pts) {
 
   plot.on("plotly_click", (ev) => {
     const pt = ev && ev.points && ev.points[0];
-    // A plain click stays a no-op: in lasso mode it is how you start a drag,
-    // and wiping the selection on a mis-click is expensive to redo.
-    if (applying || !pt || !withShift(ev)) return;
+    if (applying || !pt) return;
     const i = pt.pointIndex ?? pt.pointNumber;
-    const next = new Set(state.selection);
-    next.has(i) ? next.delete(i) : next.add(i);
-    setSelection(next, {
-      polygon: state.polygon,
-      partial: state.polygon !== null,
-      toggles: state.clickToggles + 1,
-    });
+    if (withShift(ev)) {
+      // Shift-click toggles one point into/out of the selection.
+      const next = new Set(state.selection);
+      next.has(i) ? next.delete(i) : next.add(i);
+      setSelection(next, {
+        polygon: state.polygon,
+        partial: state.polygon !== null,
+        toggles: state.clickToggles + 1,
+      });
+      return;
+    }
+    // Plain click on a point: inspect that compound. Keep the lasso selection
+    // -- plotly fires plotly_deselect just before this, so flag it to skip the
+    // clear (see the deselect handler).
+    suppressDeselect = true;
+    const id = state.points && state.points.chembl_id[i];
+    if (id) openCompoundModal(id);
   });
 
   /* A click with no drag counts as "clear the selection" in box/lasso mode,
-   * and plotly fires it *before* plotly_click -- so without this guard a
-   * shift-click would wipe the lassoed region and then add its one point to
-   * the empty set. Measured, not guessed: it is what happened. */
+   * and plotly fires it *before* plotly_click. Defer the clear by a tick so a
+   * plotly_click landing on a point can veto it (inspecting a compound must not
+   * wipe a lasso); a click on empty space has no following click, so it still
+   * clears. The shift guard stays for shift-click union. */
   plot.on("plotly_deselect", () => {
-    if (!applying && !shiftHeld) clearSelection();
+    setTimeout(() => {
+      if (suppressDeselect) {
+        suppressDeselect = false;
+        return;
+      }
+      if (!applying && !shiftHeld) clearSelection();
+    }, 0);
   });
 }
 
@@ -517,7 +593,11 @@ function renderTable(rows, container) {
       const num = typeof v === "number";
       return `<td class="${num ? "num" : ""}">${escapeHtml(v === null ? "" : v)}</td>`;
     }).join("");
-    return `<tr class="${special ? "special" : ""}">${tds}</tr>`;
+    // Rows that carry a compound id (the 화합물 table) open the detail modal.
+    const cid = r.chembl_id;
+    const cls = `${special ? "special" : ""}${cid ? " row-compound" : ""}`.trim();
+    const attr = cid ? ` data-cid="${escapeHtml(String(cid))}"` : "";
+    return `<tr class="${cls}"${attr}>${tds}</tr>`;
   }).join("");
   el.innerHTML = `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
 }
@@ -809,8 +889,47 @@ function wire() {
       document.querySelectorAll(".panel").forEach((p) => p.classList.add("hidden"));
       btn.classList.add("active");
       $(`panel-${btn.dataset.tab}`).classList.remove("hidden");
+      setTabHelp(btn.dataset.tab);
     };
   });
+  setTabHelp("describe");  // the tab that starts active
+
+  // A row in the 화합물 table opens the same detail modal as a map point click.
+  $("panel-compounds").addEventListener("click", (e) => {
+    const tr = e.target.closest("tr[data-cid]");
+    if (tr) openCompoundModal(tr.dataset.cid);
+  });
+
+  // Close the detail modal: backdrop click, the × button, or Escape.
+  $("cmodal-backdrop").addEventListener("click", (e) => {
+    if (e.target.id === "cmodal-backdrop") closeCompoundModal();
+  });
+  $("cmodal").addEventListener("click", (e) => {
+    if (e.target.id === "cmodal-close") closeCompoundModal();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") closeCompoundModal();
+  });
+}
+
+/* What each tab is for and on what basis -- shown under the tab row so the
+ * criteria are not a mystery. The two altitudes: describe/composition/clusters
+ * summarise the *group*, compounds lists the *individuals*. */
+const TAB_HELP = {
+  describe:
+    "이 선택(노드) 전체를 도메인별로 한 줄 요약합니다. 각 도메인에서 가장 흔한 상위 3개와 커버리지(데이터 있는 비율)를 보여줍니다.",
+  composition:
+    "이 선택에 들어 있는 모든 종류를 도메인별로 빠짐없이 나열합니다 — 질병·치료영역·표적·계열·스캐폴드·모달리티(개수 순), 물성은 기술자 중앙값.",
+  clusters:
+    "지도에서 밀도로 자동으로 나뉜 각 군집이 무엇인지 한 줄씩 보여줍니다. 군집마다 그 도메인·물성·모달리티의 대표 특징.",
+  tree: "지금까지 좁혀온 단계(루트 → 선택 → 전환 → 필터)를 트리로 보여줍니다.",
+  compounds:
+    "이 노드의 개별 화합물을 앞에서부터 200개까지 나열합니다(정렬·선별 없는 미리보기). 행을 클릭하면 구조와 세부 값을 크게 봅니다.",
+};
+
+function setTabHelp(tab) {
+  const el = $("tab-help");
+  if (el) el.textContent = TAB_HELP[tab] || "";
 }
 
 /* ------------------------------------------------------------------ boot */
