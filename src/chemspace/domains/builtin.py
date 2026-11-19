@@ -42,6 +42,30 @@ def _top(counter: pd.Series, k: int = 5) -> list[tuple[str, int]]:
     return [(str(i), int(v)) for i, v in counter.head(k).items()]
 
 
+def _strip(term: str) -> str:
+    """Drop the source prefix: ``MeSH:Breast Neoplasms`` -> ``Breast Neoplasms``."""
+    return term.split(":", 1)[1] if ":" in term else term
+
+
+def _lead_summary(specific: pd.Series, context: pd.Series, empty: str, k: int = 3) -> str:
+    """A cluster label that leads with the *specific* things it contains and
+    tags the broad category in parentheses.
+
+    The broad category alone (14 ATC groups, or L1 protein classes) is too
+    coarse to tell two clusters apart -- every oncology cluster reads
+    "항암·면역조절". Leading with the actual indications or targets is what makes
+    a cluster's meaning legible; the parenthesised context keeps the altitude.
+    Falls back to the context when nothing specific is annotated.
+    """
+    leads = [_strip(str(i)) for i in specific.head(k).index]
+    if leads:
+        tag = f" ({_strip(str(context.index[0]))})" if len(context) else ""
+        return " · ".join(leads) + tag
+    if len(context):
+        return " · ".join(f"{_strip(str(i))} ({v})" for i, v in context.head(k).items())
+    return empty
+
+
 class _DatasetDomain(Domain):
     def __init__(self, dataset: Dataset):
         self.ds = dataset
@@ -133,13 +157,17 @@ class DiseaseDomain(_DatasetDomain):
         terms = [t for c in compound_ids for t in self.ds.disease_terms.get(c, ())]
         counts = pd.Series(terms, dtype="object").value_counts()
         mesh = counts[counts.index.str.startswith("MeSH:")]
+        efo = counts[counts.index.str.startswith("EFO:")]
         atc = counts[counts.index.str.startswith("ATC:")]
+        # The specific indications (MeSH + EFO) lead; the ATC area tags the
+        # altitude. Both are already computed -- the old summary just threw the
+        # specific half away and showed only the 14 coarse ATC groups.
+        specific = pd.concat([mesh, efo]).sort_values(ascending=False)
         covered = sum(1 for c in compound_ids if c in self.ds.disease_terms)
         return {
             "n": len(compound_ids),
             "covered": covered,
-            "summary": " · ".join(f"{i.split(':', 1)[1]} ({v})" for i, v in atc.head(3).items())
-            or "ATC 정보 없음",
+            "summary": _lead_summary(specific, atc, "질환 정보 없음"),
             "top_indications": _top(mesh),
             "top_areas": _top(atc),
         }
@@ -184,11 +212,13 @@ class TargetDomain(_DatasetDomain):
         fam = counts[counts.index.str.startswith(("L1:", "L2:"))]
         tgt = counts[counts.index.str.startswith("TGT:")]
         covered = sum(1 for c in compound_ids if c in self.ds.target_terms)
+        # Lead with the specific proteins, tag the family -- same reasoning as
+        # the disease summary: "Membrane receptor" does not tell two target
+        # clusters apart, "Alpha-1A adrenergic receptor" does.
         return {
             "n": len(compound_ids),
             "covered": covered,
-            "summary": " · ".join(f"{i.split(':', 1)[1]} ({v})" for i, v in fam.head(3).items())
-            or "표적 정보 없음",
+            "summary": _lead_summary(tgt, fam, "표적 정보 없음"),
             "top_families": _top(fam),
             "top_targets": _top(tgt),
         }

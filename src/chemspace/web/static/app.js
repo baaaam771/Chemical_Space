@@ -37,6 +37,10 @@ const state = {
    * same 20 seconds as a useful one and leaves an empty map. */
   domainCoverage: null,
   drugLayer: null,
+  /* Per-cluster characteristic label (the cluster's own-domain summary), keyed
+   * by cluster id. Populated after the cluster profile loads, so the legend can
+   * say "군집 3 · Breast Neoplasms …" instead of a bare "군집 3". */
+  clusterLabels: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -132,7 +136,10 @@ function colourPoints(pts) {
     const counts = new Map();
     pts.cluster.forEach((c) => counts.set(c, (counts.get(c) || 0) + 1));
     [...counts.keys()].filter((c) => c >= 0).sort((a, b) => a - b)
-      .forEach((c) => legend.set(`군집 ${c}`, [PALETTE[c % PALETTE.length], counts.get(c)]));
+      .forEach((c) => {
+        const label = state.clusterLabels ? state.clusterLabels[c] : "";
+        legend.set(`군집 ${c}`, [PALETTE[c % PALETTE.length], counts.get(c), label || ""]);
+      });
     if (counts.has(NOISE)) legend.set("noise", [NOISE_COLOR, counts.get(NOISE)]);
     if (counts.has(UNCOVERED)) legend.set("데이터 없음", [UNCOVERED_COLOR, counts.get(UNCOVERED)]);
   } else {
@@ -150,12 +157,39 @@ function colourPoints(pts) {
 
 function renderLegend(legend) {
   const rows = [...legend.entries()].slice(0, 30).map(
-    ([name, [color, count]]) =>
-      `<div class="legend-row"><span class="swatch" style="background:${color}"></span>` +
-      `<span>${escapeHtml(name)}</span><span class="count">${count.toLocaleString()}</span></div>`
+    ([name, [color, count, label]]) => {
+      const tag = label
+        ? `<span class="legend-label" title="${escapeHtml(label)}">${escapeHtml(label)}</span>`
+        : "";
+      return (
+        `<div class="legend-row" title="${escapeHtml(label || name)}">` +
+        `<span class="swatch" style="background:${color}"></span>` +
+        `<span class="legend-name">${escapeHtml(name)}</span>` +
+        tag +
+        `<span class="count">${count.toLocaleString()}</span></div>`
+      );
+    }
   );
   if (legend.size > 30) rows.push(`<div class="muted small">… 외 ${legend.size - 30}개</div>`);
   $("legend").innerHTML = rows.join("");
+}
+
+/* The cluster profile carries each cluster's own-domain summary; lift it into
+ * state so the legend can show what each cluster actually is, then repaint the
+ * legend (the map was drawn before the profile arrived). */
+function applyClusterLabels(clusters) {
+  const dom = state.domains.find((d) => d.name === (state.node && state.node.domain));
+  const col = dom && dom.label;
+  const labels = {};
+  if (col) {
+    for (const row of clusters || []) {
+      if (typeof row.cluster === "number" && row[col]) labels[row.cluster] = String(row[col]);
+    }
+  }
+  state.clusterLabels = labels;
+  if (state.colorBy === "cluster" && state.points) {
+    renderLegend(colourPoints(state.points).legend);
+  }
 }
 
 function escapeHtml(s) {
@@ -496,6 +530,7 @@ async function loadNode(nodeId) {
   const [node, points] = await Promise.all([api(base), api(`${base}/points`)]);
   state.node = node;
   state.points = points;
+  state.clusterLabels = null;  // stale from the previous node until clusters reload
 
   $("breadcrumb").textContent = node.breadcrumb;
   $("domainSelect").value = node.domain;
@@ -636,6 +671,7 @@ async function refreshPanels(nodeId) {
   renderTable(describe, "panel-describe");
   renderTable(clusters, "panel-clusters");
   renderTable(compounds, "panel-compounds");
+  applyClusterLabels(clusters);
 }
 
 /* --------------------------------------------------------------- actions */

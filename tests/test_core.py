@@ -1099,3 +1099,20 @@ def test_a_cookie_signed_with_another_secret_is_not_a_login(tmp_path):
     assert us.identify(token) == "alice"
     (tmp_path / "secret").unlink()
     assert us.identify(token) is None
+
+
+def test_lead_summary_leads_with_specifics_then_context():
+    """The cluster label shows the specific things a cluster contains, with the
+    broad category only as a parenthesised tag -- and falls back to the context
+    when nothing specific is annotated."""
+    from chemspace.domains.builtin import _lead_summary
+
+    specific = pd.Series({"MeSH:Breast Neoplasms": 10, "MeSH:Lymphoma": 5})
+    context = pd.Series({"ATC:항암·면역조절": 12})
+    s = _lead_summary(specific, context, "없음")
+    assert s.startswith("Breast Neoplasms · Lymphoma")
+    assert s.endswith("(항암·면역조절)")
+
+    empty = pd.Series(dtype="int64")
+    assert _lead_summary(empty, context, "없음") == "항암·면역조절 (12)"
+    assert _lead_summary(empty, empty, "없음") == "없음"
