@@ -174,6 +174,83 @@ function josaRo(word) {
   return jong === 0 || jong === 8 ? `${word}로` : `${word}으로`;  // 8 = ㄹ
 }
 
+/* ------------------------------------------------------------ hover card */
+
+/* Plotly's native tooltip is text-only. To show the 2-D structure we turn its
+ * hover text off (hoverinfo: "none") and position our own card, which pulls the
+ * depiction from /api/compound/<id>/structure.svg -- rendered by RDKit on the
+ * server and cached, so the coordinate payload carries no SMILES per point. */
+let hoverHideTimer = null;
+
+function hoverCardEl() {
+  let el = $("hovercard");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "hovercard";
+    el.hidden = true;
+    document.body.appendChild(el);
+  }
+  return el;
+}
+
+function showHoverCard(ev) {
+  const pt = ev && ev.points && ev.points[0];
+  const pts = state.points;
+  if (!pt || !pts) return;
+  const i = pt.pointIndex ?? pt.pointNumber;
+  if (i == null) return;
+  const id = pts.chembl_id[i];
+  if (!id) return;
+
+  clearTimeout(hoverHideTimer);
+  const el = hoverCardEl();
+  const name = pts.name[i];
+  const cl = pts.cluster[i];
+  const clLabel = cl === UNCOVERED ? "미커버" : cl === NOISE ? "잡음" : `군집 ${cl}`;
+  // Rebuild only when the compound changes, so the <img> is not reloaded while
+  // the cursor merely moves within one point's hover region.
+  if (el.dataset.id !== id) {
+    el.dataset.id = id;
+    el.innerHTML =
+      `<img class="hc-struct" alt="" ` +
+      `src="/api/compound/${encodeURIComponent(id)}/structure.svg" ` +
+      `onerror="this.style.display='none'">` +
+      `<div class="hc-body">` +
+      `<div class="hc-title">${escapeHtml(id)}</div>` +
+      (name ? `<div class="hc-name">${escapeHtml(name)}</div>` : "") +
+      `<div class="hc-props">${escapeHtml(pts.modality[i])} · ` +
+      `MW ${pts.mw[i]} · cLogP ${pts.clogp[i]}</div>` +
+      `<div class="hc-cluster">${clLabel}</div>` +
+      `</div>`;
+  }
+  el.hidden = false;
+  positionHoverCard(el, ev.event);
+}
+
+function positionHoverCard(el, mouse) {
+  if (!mouse) return;
+  const pad = 14;
+  const w = el.offsetWidth || 280;
+  const h = el.offsetHeight || 180;
+  let x = mouse.clientX + pad;
+  let y = mouse.clientY + pad;
+  if (x + w > window.innerWidth - 8) x = mouse.clientX - w - pad;
+  if (y + h > window.innerHeight - 8) y = mouse.clientY - h - pad;
+  el.style.left = `${Math.max(8, x)}px`;
+  el.style.top = `${Math.max(8, y)}px`;
+}
+
+function hideHoverCard() {
+  const el = $("hovercard");
+  if (!el) return;
+  // A short delay stops the card flickering as the cursor crosses between
+  // adjacent points: plotly fires unhover an instant before the next hover.
+  hoverHideTimer = setTimeout(() => {
+    el.hidden = true;
+    el.dataset.id = "";
+  }, 90);
+}
+
 /* ------------------------------------------------------------------ plot */
 
 /* Pan and zoom belong to the node, not to the redraw. A new node is a fresh
@@ -192,11 +269,6 @@ function drawPlot(pts) {
   const { colors, legend } = colourPoints(pts);
   renderLegend(legend);
 
-  const hover = pts.chembl_id.map((id, i) =>
-    `${id}${pts.name[i] ? " · " + pts.name[i] : ""}<br>` +
-    `${pts.modality[i]} · MW ${pts.mw[i]} · cLogP ${pts.clogp[i]} · 군집 ${pts.cluster[i]}`
-  );
-
   const trace = {
     type: "scattergl",
     mode: "markers",
@@ -208,8 +280,10 @@ function drawPlot(pts) {
       opacity: 0.8,
       line: { width: 0 },
     },
-    text: hover,
-    hovertemplate: "%{text}<extra></extra>",
+    // Native hover text is off: a custom card (showHoverCard) draws the 2-D
+    // structure alongside the id and properties, which a text-only tooltip
+    // cannot do.
+    hoverinfo: "none",
     // Stated rather than left to plotly's defaults, because a shift-click
     // selection has to look the same as a lassoed one.
     selected: { marker: { opacity: 1 } },
@@ -251,9 +325,21 @@ function drawPlot(pts) {
   drawnNode = state.nodeId;
 
   const plot = $("plot");
-  ["plotly_selected", "plotly_deselect", "plotly_click", "plotly_doubleclick"].forEach(
-    (e) => plot.removeAllListeners?.(e)
-  );
+  [
+    "plotly_selected", "plotly_deselect", "plotly_click", "plotly_doubleclick",
+    "plotly_hover", "plotly_unhover",
+  ].forEach((e) => plot.removeAllListeners?.(e));
+
+  plot.on("plotly_hover", (ev) => showHoverCard(ev));
+  plot.on("plotly_unhover", () => hideHoverCard());
+  // Belt and suspenders: plotly_unhover is reliable when the cursor leaves a
+  // marker, but leaving the plot area entirely (or starting a drag) should
+  // drop the card too, and those do not always surface as unhover.
+  if (!plot._hoverLeaveWired) {
+    plot.addEventListener("mouseleave", () => hideHoverCard());
+    plot.addEventListener("mousedown", () => hideHoverCard());
+    plot._hoverLeaveWired = true;
+  }
 
   /* Plotly's own double-click reset goes back to whatever range was in force
    * when the plot was last built -- and a recolour rebuilds it at the current

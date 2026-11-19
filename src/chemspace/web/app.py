@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -151,6 +152,64 @@ def table_records(df) -> list[dict]:
     if df is None or len(df) == 0:
         return []
     return df.reset_index().replace({np.nan: ""}).astype(object).to_dict(orient="records")
+
+
+def _clean(v) -> Any:
+    """A JSON-safe builtin number: NaN/None -> null, else a rounded float.
+
+    numpy scalars go through ``float()`` so the response never carries an
+    ``np.float64`` that the JSON encoder would choke on."""
+    if v is None:
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return str(v)
+    return None if np.isnan(f) else round(f, 2)
+
+
+def compound_record(dataset, chembl_id: str) -> dict | None:
+    """Per-compound reference fields for the hover card. Global, not node-scoped
+    -- a compound's structure is the same wherever it is placed."""
+    df = dataset.compounds
+    if chembl_id not in df.index:
+        return None
+    r = df.loc[chembl_id]
+    name = r.get("pref_name")
+    name = "" if name is None or (isinstance(name, float) and np.isnan(name)) else str(name)
+    return {
+        "chembl_id": chembl_id,
+        "name": name,
+        "smiles": str(r.get("canonical_smiles") or ""),
+        "modality": str(r.get("modality") or ""),
+        "mw": _clean(r.get("mw")),
+        "clogp": _clean(r.get("clogp")),
+        "qed": _clean(r.get("qed")),
+    }
+
+
+@lru_cache(maxsize=8192)
+def _svg_for_smiles(smiles: str) -> str | None:
+    """Render a SMILES to a compact, transparent-background 2-D SVG.
+
+    Cached by SMILES: the same structure is drawn once however many points or
+    sessions hover it. RDKit is imported lazily so process start stays light.
+    """
+    if not smiles:
+        return None
+    from rdkit import Chem
+    from rdkit.Chem.Draw import rdMolDraw2D
+
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        return None
+    d = rdMolDraw2D.MolDraw2DSVG(260, 200)
+    opts = d.drawOptions()
+    opts.clearBackground = False  # let the hover card's own background show
+    opts.bondLineWidth = 1
+    rdMolDraw2D.PrepareAndDrawMolecule(d, mol)
+    d.FinishDrawing()
+    return d.GetDrawingText()
 
 
 # --------------------------------------------------------------------- app
@@ -504,6 +563,33 @@ def create_app(
         session = need(session_id, request)
         need_node(session, node_id)
         return frame_records(session, node_id, min(max(limit, 1), 2000))
+
+    # ------------------------------------------------------------- compound
+
+    # Not session-scoped: a compound's structure and properties are the same
+    # wherever it sits. Hover fetches these lazily, so the big coordinate
+    # payload never has to carry a SMILES string per point.
+
+    @app.get("/api/compound/{chembl_id}")
+    def compound_detail(chembl_id: str):
+        rec = compound_record(store.dataset, chembl_id)
+        if rec is None:
+            raise HTTPException(404, f"no compound {chembl_id}")
+        return rec
+
+    @app.get("/api/compound/{chembl_id}/structure.svg")
+    def compound_structure(chembl_id: str):
+        rec = compound_record(store.dataset, chembl_id)
+        if rec is None:
+            raise HTTPException(404, f"no compound {chembl_id}")
+        svg = _svg_for_smiles(rec["smiles"])
+        if svg is None:
+            raise HTTPException(404, f"no drawable structure for {chembl_id}")
+        return Response(
+            svg,
+            media_type="image/svg+xml",
+            headers={"Cache-Control": "public, max-age=86400"},
+        )
 
     # -------------------------------------------------------------- static
 

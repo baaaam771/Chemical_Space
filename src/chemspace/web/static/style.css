@@ -195,3 +195,40 @@ tr.special td { color: var(--muted); font-style: italic; }
 #loginError:empty { display: none; }
 
 #whoami { margin-left: auto; }
+
+/* Hover card: the 2-D structure plus id/props, positioned at the cursor.
+ * pointer-events: none so it never intercepts a lasso drag underneath it. */
+#hovercard {
+  position: fixed;
+  z-index: 50;
+  pointer-events: none;
+  display: flex;
+  gap: 10px;
+  max-width: 300px;
+  padding: 8px 10px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.14);
+}
+#hovercard[hidden] { display: none; }
+#hovercard .hc-struct {
+  width: 120px;
+  height: 92px;
+  flex: none;
+  object-fit: contain;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+#hovercard .hc-body { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+#hovercard .hc-title { font-weight: 650; font-size: 13px; }
+#hovercard .hc-name {
+  font-size: 12px;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#hovercard .hc-props { font-size: 12px; color: var(--muted); }
+#hovercard .hc-cluster { font-size: 12px; color: var(--accent); margin-top: 2px; }

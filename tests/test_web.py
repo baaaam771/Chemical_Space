@@ -39,6 +39,7 @@ class FakeStore:
         ds.compounds["clogp"] = np.linspace(-1, 6, len(ds.compounds))
         ds.compounds["qed"] = np.linspace(0.1, 0.9, len(ds.compounds))
         ds.compounds["murcko_smiles"] = "c1ccccc1"
+        ds.compounds["canonical_smiles"] = "c1ccccc1"  # drawable by the structure endpoint
         self.dataset = ds
         self.registry = DomainRegistry()
         self.registry.register(ContinuousDomain(ds))
@@ -173,6 +174,39 @@ def test_points_payload_is_row_aligned(client):
     n = 80
     for key in ("x", "y", "cluster", "chembl_id", "name", "modality", "mw", "clogp"):
         assert len(pts[key]) == n, f"{key} has {len(pts[key])} entries, expected {n}"
+
+
+def test_compound_detail_returns_structure_fields(client):
+    sid, node_id = make_root(client)
+    pts = client.get(f"/api/sessions/{sid}/nodes/{node_id}/points").json()
+    cid = pts["chembl_id"][0]
+    rec = client.get(f"/api/compound/{cid}").json()
+    assert rec["chembl_id"] == cid
+    assert rec["smiles"]  # the hover card needs a structure string to draw
+    for key in ("name", "modality", "mw", "clogp", "qed"):
+        assert key in rec
+
+
+def test_structure_svg_renders(client):
+    sid, node_id = make_root(client)
+    pts = client.get(f"/api/sessions/{sid}/nodes/{node_id}/points").json()
+    cid = pts["chembl_id"][0]
+    r = client.get(f"/api/compound/{cid}/structure.svg")
+    assert r.status_code == 200, r.text
+    assert "image/svg+xml" in r.headers["content-type"]
+    assert "<svg" in r.text
+
+
+def test_unknown_compound_is_404(client):
+    assert client.get("/api/compound/CHEMBL_nope").status_code == 404
+    assert client.get("/api/compound/CHEMBL_nope/structure.svg").status_code == 404
+
+
+def test_compound_endpoints_require_login(anon):
+    # The structure image is fetched by an <img> tag, which carries the cookie;
+    # without a session it must be refused like every other data route.
+    assert anon.get("/api/compound/anything").status_code == 401
+    assert anon.get("/api/compound/anything/structure.svg").status_code == 401
 
 
 def test_select_narrows_and_switch_preserves(client):
