@@ -34,6 +34,7 @@ __all__ = [
     "PhysChemDomain",
     "DiseaseDomain",
     "TargetDomain",
+    "TargetSeqDomain",
     "MoietyDomain",
     "ModalityDomain",
 ]
@@ -297,6 +298,64 @@ class TargetDomain(_DatasetDomain):
 
     def term_counts(self, compound_ids: Sequence[str]) -> dict:
         return Counter(t for c in compound_ids for t in self.ds.target_terms.get(c, ()))
+
+
+def _standardize_covered(X: np.ndarray, covered: np.ndarray, eps: float = 1e-9):
+    """Z-score columns using the covered rows' own mean/spread, drop constants.
+
+    Unlike :func:`standardize_within_subset`, the statistics come from the
+    covered rows only (uncovered rows are all-zero placeholders that
+    ``place`` never embeds), so they do not pull the mean toward zero.
+    """
+    X = np.asarray(X, dtype=np.float64)
+    cov = X[covered]
+    if cov.shape[0] < 2:
+        return np.zeros((X.shape[0], 0), np.float32), {"kept": 0}
+    mu, sd = cov.mean(0), cov.std(0)
+    keep = sd > eps
+    Z = np.zeros((X.shape[0], int(keep.sum())), np.float32)
+    Z[covered] = ((cov[:, keep] - mu[keep]) / sd[keep]).astype(np.float32)
+    return Z, {"kept": int(keep.sum()), "dropped_constant": int((~keep).sum())}
+
+
+class TargetSeqDomain(TargetDomain):
+    """The target domain re-laid-out by protein *sequence* similarity.
+
+    Same compounds, same target tokens for every text tab (so a cluster still
+    reads as its enriched ``TGT:``/family terms), but the map and clusters are
+    built from ESM-2 sequence embeddings instead of Jaccard over target tokens.
+    Homologous targets land near each other even when they share no token, and
+    the distances actually spread -- see the measurement in the README. Only
+    compounds with a UniProt-mapped protein target are covered.
+    """
+
+    name = "target_seq"
+    label = "표적(서열)"
+    description = "표적 단백질 서열 임베딩 (ESM-2 650M, 잔기 평균 → 부분집합 z-score) — 같은 표적 토큰으로 설명"
+
+    def featurize(self, compound_ids: Sequence[str]) -> DomainFeatures:
+        ids = tuple(compound_ids)
+        esm = self.ds.target_embeddings
+        acc = self.ds.target_accessions
+        dim = esm.dim if esm else 0
+        X = np.zeros((len(ids), dim), np.float64)
+        covered = np.zeros(len(ids), dtype=bool)
+        if esm is not None:
+            for i, c in enumerate(ids):
+                v = esm.mean_vector(acc.get(c, ()))
+                if v is not None:
+                    X[i] = v
+                    covered[i] = True
+        Z, notes = _standardize_covered(X, covered)
+        return DomainFeatures(
+            X=Z,
+            compound_ids=ids,
+            covered=covered,
+            feature_names=tuple(f"esm{i}" for i in range(Z.shape[1])),
+            metric="euclidean",
+            kind="continuous",
+            notes=notes,
+        )
 
 
 # --------------------------------------------------------------------------- #

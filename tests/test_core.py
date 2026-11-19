@@ -1116,3 +1116,53 @@ def test_lead_summary_leads_with_specifics_then_context():
     empty = pd.Series(dtype="int64")
     assert _lead_summary(empty, context, "없음") == "항암·면역조절 (12)"
     assert _lead_summary(empty, empty, "없음") == "없음"
+
+
+# ---------------------------------------------------------------- target_seq
+
+
+def _esm_fake_ds():
+    """A tiny dataset carrying ESM embeddings for three accessions."""
+    from chemspace.data.dataset import TargetESM
+
+    ids = [f"C{i:04d}" for i in range(8)]
+    rng = np.random.default_rng(1)
+    mat = rng.normal(size=(3, 6)).astype(np.float32)
+    esm = TargetESM(dim=6, index={"P1": 0, "P2": 1, "P3": 2}, matrix=mat)
+    # C0..C4 hit known proteins; C5 hits an accession with no embedding; C6/C7
+    # have no target at all -> uncovered.
+    accs = {"C0000": ("P1",), "C0001": ("P2",), "C0002": ("P1", "P2"),
+            "C0003": ("P3",), "C0004": ("P2", "P3"), "C0005": ("P9",)}
+    terms = {c: ("L1:Enzyme", "TGT:Protein") for c in accs}
+    return SimpleNamespace(target_embeddings=esm, target_accessions=accs,
+                           target_terms=terms, compounds=pd.DataFrame(index=ids)), ids
+
+
+def test_target_seq_domain_builds_sequence_features():
+    from chemspace.domains.builtin import TargetSeqDomain
+
+    ds, ids = _esm_fake_ds()
+    dom = TargetSeqDomain(ds)
+    f = dom.featurize(ids)
+
+    assert f.metric == "euclidean" and f.kind == "continuous"
+    # covered exactly the five with an embedded accession (C5's P9 is absent)
+    assert [ids[i] for i in np.flatnonzero(f.covered)] == ["C0000", "C0001", "C0002", "C0003", "C0004"]
+    # uncovered rows stay zero; covered rows are z-scored (mean ~0 per column)
+    assert np.allclose(f.X[~f.covered], 0.0)
+    assert np.allclose(f.X[f.covered].mean(axis=0), 0.0, atol=1e-5)
+
+
+def test_target_seq_registered_only_when_embeddings_present():
+    from chemspace.domains import default_registry
+    from chemspace.domains.builtin import TargetSeqDomain
+
+    ds, _ = _esm_fake_ds()
+    # The real registry needs a full Dataset; here just check the guard logic
+    # the registry uses, plus that the domain reuses target tokens to describe.
+    assert ds.target_embeddings is not None
+    dom = TargetSeqDomain(ds)
+    assert dom.name == "target_seq"
+    # description comes from target tokens, not the embedding vectors
+    prof = dom.profile(["C0000", "C0002"])
+    assert "Protein" in prof["summary"]

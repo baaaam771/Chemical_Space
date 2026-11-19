@@ -12,6 +12,7 @@ from chemspace.domains.builtin import (
     MoietyDomain,
     PhysChemDomain,
     TargetDomain,
+    TargetSeqDomain,
 )
 
 __all__ = [
@@ -21,6 +22,7 @@ __all__ = [
     "PhysChemDomain",
     "DiseaseDomain",
     "TargetDomain",
+    "TargetSeqDomain",
     "MoietyDomain",
     "ModalityDomain",
     "default_registry",
@@ -73,8 +75,15 @@ class DomainRegistry:
 
 
 def default_registry(dataset: Dataset) -> DomainRegistry:
-    """All five built-in domains, bound to one dataset."""
+    """The built-in domains, bound to one dataset.
+
+    The ESM-2 sequence view is registered only when the snapshot ships the
+    precomputed embeddings (``target_esm.npz``); otherwise it would be a dead
+    entry in the domain picker.
+    """
     reg = DomainRegistry()
     for cls in BUILTIN:
         reg.register(cls(dataset))
+    if getattr(dataset, "target_embeddings", None) is not None:
+        reg.register(TargetSeqDomain(dataset))
     return reg

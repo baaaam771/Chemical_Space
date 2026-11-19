@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Sequence
 
@@ -78,6 +78,34 @@ ATC_LEVEL1 = {
 
 
 @dataclass
+class TargetESM:
+    """Per-accession ESM-2 sequence embeddings (``target_esm.npz``).
+
+    Shared across snapshots and keyed by UniProt accession; a compound's
+    sequence vector is the mean over the accessions of the targets it hits.
+    """
+
+    dim: int
+    index: dict[str, int]
+    matrix: np.ndarray  # (n_accessions, dim) float32
+
+    def mean_vector(self, accessions: Sequence[str]) -> np.ndarray | None:
+        rows = [self.index[a] for a in accessions if a in self.index]
+        if not rows:
+            return None
+        return self.matrix[rows].mean(axis=0)
+
+    @classmethod
+    def load(cls, path: Path) -> "TargetESM | None":
+        if not path.exists():
+            return None
+        npz = np.load(path, allow_pickle=True)
+        accs = [str(a) for a in npz["accessions"]]
+        mat = np.ascontiguousarray(npz["emb"], dtype=np.float32)
+        return cls(dim=int(mat.shape[1]), index={a: i for i, a in enumerate(accs)}, matrix=mat)
+
+
+@dataclass
 class Dataset:
     """One ChEMBL snapshot, ready to be looked at through any domain."""
 
@@ -99,6 +127,12 @@ class Dataset:
     disease_terms: dict[str, tuple[str, ...]]
     target_terms: dict[str, tuple[str, ...]]
     manifest: dict
+
+    target_accessions: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    """Compound -> its targets' UniProt accessions, for the sequence domain."""
+    target_embeddings: "TargetESM | None" = None
+    """Precomputed per-accession ESM-2 sequence embeddings, if the snapshot
+    ships ``target_esm.npz``. ``None`` means the sequence domain is unavailable."""
 
     _row_of: dict[str, int] = None  # type: ignore[assignment]
 
@@ -161,6 +195,8 @@ class Dataset:
             disease_terms=cls._disease_terms(compounds, inds),
             target_terms=cls._target_terms(targets),
             manifest=manifest,
+            target_accessions=cls._target_accessions(targets),
+            target_embeddings=TargetESM.load(snap / "target_esm.npz"),
         )
 
     @staticmethod
@@ -213,7 +249,7 @@ class Dataset:
         whichever table it came from, and splitting it would stop two compounds
         that hit the same protein from ever sharing a feature.
         """
-        cols = ["target_chembl_id", "target_pref_name", "target_type", "organism", "protein_class_id"]
+        cols = ["target_chembl_id", "target_pref_name", "target_type", "organism", "protein_class_id", "accession"]
         t = tgts[[c for c in cols if c in tgts.columns]].drop_duplicates()
         pc_cols = ["protein_class_id", "class_path", "l1", "l2", "l3", "l4", "l5", "l6"]
 
@@ -310,6 +346,22 @@ class Dataset:
             if isinstance(name, str) and name:
                 s.add(f"TGT:{name}")
         return {k: tuple(sorted(v)) for k, v in terms.items()}
+
+    @staticmethod
+    def _target_accessions(targets: pd.DataFrame) -> dict[str, tuple[str, ...]]:
+        """Compound -> UniProt accessions of the targets it hits.
+
+        Parallel to :meth:`_target_terms` but keeps the accession, which is the
+        key into the ESM-2 sequence embeddings.
+        """
+        if "accession" not in targets.columns:
+            return {}
+        acc: dict[str, set[str]] = {}
+        for rec in targets.itertuples(index=False):
+            a = getattr(rec, "accession", None)
+            if isinstance(a, str) and a:
+                acc.setdefault(rec.chembl_id, set()).add(a)
+        return {k: tuple(sorted(v)) for k, v in acc.items()}
 
     # ----------------------------------------------------------------- access
 
