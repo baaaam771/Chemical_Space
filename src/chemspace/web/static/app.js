@@ -215,7 +215,13 @@ function josaRo(word) {
  * depiction from /api/compound/<id>/structure.svg -- rendered by RDKit on the
  * server and cached, so the coordinate payload carries no SMILES per point. */
 let hoverHideTimer = null;
-let suppressDeselect = false;  // set by a point click so the deselect clear is skipped
+/* A plain click on a point, in lasso mode, arrives only as an empty
+ * plotly_selected -- no plotly_click, and the hover events are too flaky to
+ * rely on. So we track the raw mousedown position and whether the cursor then
+ * dragged; on an empty selection that was a click (not a drag), we find the
+ * nearest point to that pixel ourselves and open its detail. */
+let clickDown = null;         // {x, y, t} of the last mousedown over the plot
+let draggedSinceDown = false; // true once the cursor moved far enough to be a drag
 
 function hoverCardEl() {
   let el = $("hovercard");
@@ -427,12 +433,18 @@ function drawPlot(pts) {
 
   plot.on("plotly_hover", (ev) => showHoverCard(ev));
   plot.on("plotly_unhover", () => hideHoverCard());
-  // Belt and suspenders: plotly_unhover is reliable when the cursor leaves a
-  // marker, but leaving the plot area entirely (or starting a drag) should
-  // drop the card too, and those do not always surface as unhover.
   if (!plot._hoverLeaveWired) {
     plot.addEventListener("mouseleave", () => hideHoverCard());
-    plot.addEventListener("mousedown", () => hideHoverCard());
+    plot.addEventListener("mousedown", (e) => {
+      clickDown = { x: e.clientX, y: e.clientY, t: performance.now() };
+      draggedSinceDown = false;
+      hideHoverCard();
+    });
+    plot.addEventListener("mousemove", (e) => {
+      if (clickDown && Math.abs(e.clientX - clickDown.x) + Math.abs(e.clientY - clickDown.y) > 6) {
+        draggedSinceDown = true;
+      }
+    });
     plot._hoverLeaveWired = true;
   }
 
@@ -446,8 +458,32 @@ function drawPlot(pts) {
 
   plot.on("plotly_selected", (ev) => {
     if (applying) return;   // our own restyle, not a gesture
-    // Plotly fires this with no payload when a selection is cleared.
-    if (!ev || !ev.points) return shiftHeld ? undefined : clearSelection();
+    // Plotly fires this with no payload when a selection is cleared -- and, in
+    // lasso mode, a plain click on a point lands here too (empty selection,
+    // never plotly_click). If a point is under the cursor, treat it as
+    // click-to-inspect: open the detail and keep the current lasso selection.
+    if (!ev || !ev.points) {
+      // An empty selection that was a plain click (no drag), landing on a
+      // point, is a request to inspect that compound -- open it and keep the
+      // current selection rather than clearing.
+      if (
+        !shiftHeld &&
+        clickDown &&
+        !draggedSinceDown &&
+        performance.now() - clickDown.t < 500
+      ) {
+        const i = nearestPoint(clickDown.x, clickDown.y);
+        clickDown = null;
+        if (i >= 0) {
+          const id = state.points && state.points.chembl_id[i];
+          if (id) {
+            openCompoundModal(id);
+            return;
+          }
+        }
+      }
+      return shiftHeld ? undefined : clearSelection();
+    }
     const idx = ev.points.map((p) => p.pointIndex ?? p.pointNumber);
     const poly = lassoPolygon(ev);
     if (withShift(ev) && state.selection.size) {
@@ -478,28 +514,36 @@ function drawPlot(pts) {
       });
       return;
     }
-    // Plain click on a point: inspect that compound. Keep the lasso selection
-    // -- plotly fires plotly_deselect just before this, so flag it to skip the
-    // clear (see the deselect handler).
-    suppressDeselect = true;
-    const id = state.points && state.points.chembl_id[i];
-    if (id) openCompoundModal(id);
+    // Plain-click inspection is handled in plotly_selected: in lasso mode plotly
+    // does not fire plotly_click for a plain click on a point, only an empty
+    // plotly_selected.
   });
 
-  /* A click with no drag counts as "clear the selection" in box/lasso mode,
-   * and plotly fires it *before* plotly_click. Defer the clear by a tick so a
-   * plotly_click landing on a point can veto it (inspecting a compound must not
-   * wipe a lasso); a click on empty space has no following click, so it still
-   * clears. The shift guard stays for shift-click union. */
+  /* A click with no drag counts as "clear the selection" in box/lasso mode. */
   plot.on("plotly_deselect", () => {
-    setTimeout(() => {
-      if (suppressDeselect) {
-        suppressDeselect = false;
-        return;
-      }
-      if (!applying && !shiftHeld) clearSelection();
-    }, 0);
+    if (!applying && !shiftHeld) clearSelection();
   });
+}
+
+/* The index of the plotted point nearest a viewport pixel, or -1 if none is
+ * within ~12px. Used to turn a click into a compound to inspect without relying
+ * on plotly's own (flaky, in lasso mode) hit testing. */
+function nearestPoint(clientX, clientY) {
+  const plot = $("plot");
+  const pts = state.points;
+  if (!plot._fullLayout || !pts || !pts.x.length) return -1;
+  const r = plot.getBoundingClientRect();
+  const xa = plot._fullLayout.xaxis, ya = plot._fullLayout.yaxis;
+  const px = clientX - r.left - xa._offset;
+  const py = clientY - r.top - ya._offset;
+  let best = -1, bestD = 12 * 12;
+  for (let i = 0; i < pts.x.length; i++) {
+    const dx = xa.l2p(pts.x[i]) - px;
+    const dy = ya.l2p(pts.y[i]) - py;
+    const d = dx * dx + dy * dy;
+    if (d < bestD) { bestD = d; best = i; }
+  }
+  return best;
 }
 
 function lassoPolygon(ev) {
