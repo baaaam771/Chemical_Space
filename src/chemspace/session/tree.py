@@ -488,14 +488,28 @@ class ExplorationSession:
                 or prof.get("modalities")
                 or []
             )
+            # The specific things, for the summary line: proteins for target,
+            # indications for disease -- not the coarse families the "상위 항목"
+            # column already lists. Up to five, where the one-line cluster
+            # summary stops at three.
+            specific = (
+                prof.get("top_indications")
+                or prof.get("top_targets")
+                or prof.get("top_scaffolds")
+                or prof.get("modalities")
+                or []
+            )
+            summary = " · ".join(k.split(":", 1)[-1] for k, _ in specific[:5]) or prof.get(
+                "summary", ""
+            )
             rows.append(
                 {
                     "도메인": dom.label,
-                    "요약": prof.get("summary", ""),
+                    "요약": summary,
                     "데이터 있음": f"{covered:,}/{node.n:,}",
                     "커버리지": f"{covered / node.n:.0%}" if node.n else "-",
                     "상위 항목": ", ".join(
-                        f"{k.split(':', 1)[-1]}({v})" for k, v in top[:3]
+                        f"{k.split(':', 1)[-1]}({v})" for k, v in top[:5]
                     ),
                     "현재 도메인": "◀" if name == node.domain else "",
                 }
