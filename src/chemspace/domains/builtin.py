@@ -47,19 +47,41 @@ def _strip(term: str) -> str:
     return term.split(":", 1)[1] if ":" in term else term
 
 
-def _lead_summary(specific: pd.Series, context: pd.Series, empty: str, k: int = 3) -> str:
+def _section(title: str, series: pd.Series, top: int) -> dict:
+    """One block of the 구성 종류 view: the distinct-kind count and the first
+    ``top`` kinds with their frequencies."""
+    return {
+        "title": title,
+        "total": int(len(series)),
+        "items": [{"name": _strip(str(i)), "count": int(v)} for i, v in series.head(top).items()],
+    }
+
+
+def _lead_summary(
+    specific: pd.Series, context: pd.Series, empty: str, k: int = 3, tag_min: float = 0.5
+) -> str:
     """A cluster label that leads with the *specific* things it contains and
-    tags the broad category in parentheses.
+    tags the broad category in parentheses -- but only when that category is
+    actually representative.
 
     The broad category alone (14 ATC groups, or L1 protein classes) is too
     coarse to tell two clusters apart -- every oncology cluster reads
     "항암·면역조절". Leading with the actual indications or targets is what makes
     a cluster's meaning legible; the parenthesised context keeps the altitude.
-    Falls back to the context when nothing specific is annotated.
+
+    The tag is the single most common context term, which is only a fair label
+    when the set is reasonably homogeneous. On a mixed selection the leads are
+    cancers while the top ATC area is CNS, and "Neoplasms … (신경계)" is simply
+    wrong -- so the tag is dropped unless the top context term holds at least
+    ``tag_min`` of the context annotations. Falls back to the context list when
+    nothing specific is annotated.
     """
     leads = [_strip(str(i)) for i in specific.head(k).index]
     if leads:
-        tag = f" ({_strip(str(context.index[0]))})" if len(context) else ""
+        tag = ""
+        total = float(context.sum()) if len(context) else 0.0
+        if total and float(context.iloc[0]) / total >= tag_min:
+            tag = f" ({_strip(str(context.index[0]))})"
         return " · ".join(leads) + tag
     if len(context):
         return " · ".join(f"{_strip(str(i))} ({v})" for i, v in context.head(k).items())
@@ -112,6 +134,13 @@ class PhysChemDomain(_DatasetDomain):
             "medians": {k: round(float(v), 2) for k, v in med.items()},
             "region": _physchem_region(med),
         }
+
+    def composition(self, compound_ids: Sequence[str], top: int = 25) -> list[dict]:
+        # Continuous, so there are no "kinds" to count -- show each descriptor's
+        # median instead, which is what characterises a physchem region.
+        med = self.ds.frame(compound_ids)[list(PHYSCHEM_FEATURES)].median(numeric_only=True)
+        items = [{"name": str(k), "count": round(float(v), 2)} for k, v in med.items()]
+        return [{"title": "물리화학 기술자 (중앙값)", "total": len(items), "items": items}]
 
 
 def _kept_mask(raw: np.ndarray, eps: float = 1e-9) -> np.ndarray:
@@ -179,6 +208,20 @@ class DiseaseDomain(_DatasetDomain):
 
         return pd.Series([primary(c) for c in compound_ids], index=list(compound_ids))
 
+    def composition(self, compound_ids: Sequence[str], top: int = 25) -> list[dict]:
+        terms = [t for c in compound_ids for t in self.ds.disease_terms.get(c, ())]
+        counts = pd.Series(terms, dtype="object").value_counts()
+        mesh = counts[counts.index.str.startswith("MeSH:")]
+        efo = counts[counts.index.str.startswith("EFO:")]
+        atc = counts[counts.index.str.startswith("ATC:")]
+        specific = pd.concat([mesh, efo]).sort_values(ascending=False)
+        out = []
+        if len(specific):
+            out.append(_section("질병 (MeSH/EFO)", specific, top))
+        if len(atc):
+            out.append(_section("치료영역 (ATC)", atc, top))
+        return out
+
 
 # --------------------------------------------------------------------------- #
 
@@ -210,15 +253,18 @@ class TargetDomain(_DatasetDomain):
         terms = [t for c in compound_ids for t in self.ds.target_terms.get(c, ())]
         counts = pd.Series(terms, dtype="object").value_counts()
         fam = counts[counts.index.str.startswith(("L1:", "L2:"))]
+        l1 = counts[counts.index.str.startswith("L1:")]
         tgt = counts[counts.index.str.startswith("TGT:")]
         covered = sum(1 for c in compound_ids if c in self.ds.target_terms)
         # Lead with the specific proteins, tag the family -- same reasoning as
         # the disease summary: "Membrane receptor" does not tell two target
-        # clusters apart, "Alpha-1A adrenergic receptor" does.
+        # clusters apart, "Alpha-1A adrenergic receptor" does. The tag is built
+        # from L1 alone (one per compound) so its share is a clean fraction;
+        # fam mixes L1 and L2 and would double-count.
         return {
             "n": len(compound_ids),
             "covered": covered,
-            "summary": _lead_summary(tgt, fam, "표적 정보 없음"),
+            "summary": _lead_summary(tgt, l1, "표적 정보 없음"),
             "top_families": _top(fam),
             "top_targets": _top(tgt),
         }
@@ -229,6 +275,21 @@ class TargetDomain(_DatasetDomain):
             return l1[0].split(":", 1)[1] if l1 else "미분류"
 
         return pd.Series([primary(c) for c in compound_ids], index=list(compound_ids))
+
+    def composition(self, compound_ids: Sequence[str], top: int = 25) -> list[dict]:
+        terms = [t for c in compound_ids for t in self.ds.target_terms.get(c, ())]
+        counts = pd.Series(terms, dtype="object").value_counts()
+        tgt = counts[counts.index.str.startswith("TGT:")]
+        l1 = counts[counts.index.str.startswith("L1:")]
+        l2 = counts[counts.index.str.startswith("L2:")]
+        out = []
+        if len(tgt):
+            out.append(_section("단백질 표적 (TGT)", tgt, top))
+        if len(l1):
+            out.append(_section("단백질 계열 L1", l1, top))
+        if len(l2):
+            out.append(_section("단백질 계열 L2", l2, top))
+        return out
 
 
 # --------------------------------------------------------------------------- #
@@ -276,6 +337,17 @@ class MoietyDomain(_DatasetDomain):
             "top_scaffolds": _top(scaf),
             "top_frameworks": _top(generic, 3),
         }
+
+    def composition(self, compound_ids: Sequence[str], top: int = 25) -> list[dict]:
+        df = self.ds.frame(compound_ids)
+        scaf = df["murcko_smiles"].replace("", np.nan).dropna().value_counts()
+        generic = df["murcko_generic"].replace("", np.nan).dropna().value_counts()
+        out = []
+        if len(scaf):
+            out.append(_section("스캐폴드 (Murcko)", scaf, top))
+        if len(generic):
+            out.append(_section("골격 (generic)", generic, top))
+        return out
 
 
 # --------------------------------------------------------------------------- #
@@ -355,3 +427,7 @@ class ModalityDomain(_DatasetDomain):
 
     def color_series(self, compound_ids: Sequence[str]) -> pd.Series | None:
         return self.ds.frame(compound_ids)["modality"]
+
+    def composition(self, compound_ids: Sequence[str], top: int = 25) -> list[dict]:
+        counts = self.ds.frame(compound_ids)["modality"].value_counts()
+        return [_section("모달리티", counts, top)] if len(counts) else []

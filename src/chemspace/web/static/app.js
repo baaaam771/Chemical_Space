@@ -522,6 +522,42 @@ function renderTable(rows, container) {
   el.innerHTML = `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
 }
 
+/* The 구성 종류 view: per domain, every discrete kind present in this node with
+ * its count -- the full list the top-3 summary only previews. */
+function renderComposition(data, container) {
+  const el = $(container);
+  if (!data || !data.length) {
+    el.innerHTML = '<div class="muted">표시할 내용이 없습니다.</div>';
+    return;
+  }
+  el.innerHTML = data
+    .map((d) => {
+      const sections = d.sections
+        .map((s) => {
+          const rows = s.items
+            .map(
+              (it) =>
+                `<div class="comp-row"><span class="comp-name" title="${escapeHtml(it.name)}">` +
+                `${escapeHtml(it.name)}</span>` +
+                `<span class="comp-count">${Number(it.count).toLocaleString()}</span></div>`
+            )
+            .join("");
+          const rest = s.total - s.items.length;
+          const more = rest > 0 ? `<div class="muted small">… 외 ${rest.toLocaleString()}종</div>` : "";
+          return (
+            `<div class="comp-section"><div class="comp-title">${escapeHtml(s.title)} ` +
+            `<span class="muted">${s.total.toLocaleString()}종</span></div>${rows}${more}</div>`
+          );
+        })
+        .join("");
+      return (
+        `<div class="comp-domain"><h4>${escapeHtml(d.domain)}${d.current ? " ◀" : ""}</h4>` +
+        `${sections}</div>`
+      );
+    })
+    .join("");
+}
+
 /* ----------------------------------------------------------------- views */
 
 async function loadNode(nodeId) {
@@ -663,12 +699,14 @@ async function refreshSessionViews() {
 
 async function refreshPanels(nodeId) {
   const base = `/api/sessions/${state.sessionId}/nodes/${nodeId}`;
-  const [describe, clusters, compounds] = await Promise.all([
+  const [describe, composition, clusters, compounds] = await Promise.all([
     api(`${base}/describe`),
+    api(`${base}/composition`),
     api(`${base}/clusters`),
     api(`${base}/compounds?limit=200`),
   ]);
   renderTable(describe, "panel-describe");
+  renderComposition(composition, "panel-composition");
   renderTable(clusters, "panel-clusters");
   renderTable(compounds, "panel-compounds");
   applyClusterLabels(clusters);

@@ -117,6 +117,17 @@ class Domain(ABC):
         """
         return None
 
+    def composition(self, compound_ids: Sequence[str], top: int = 25) -> list[dict]:
+        """Full breakdown of the discrete kinds in this group, for the "구성
+        종류" view -- the long list a top-3 summary only hints at.
+
+        Returns a list of sections, each ``{"title", "total", "items": [{"name",
+        "count"}]}``: ``total`` is how many distinct kinds there are, ``items``
+        the first ``top`` of them. Default empty, so a domain with no
+        categorical structure (or a test stub) simply contributes nothing.
+        """
+        return []
+
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"<Domain {self.name} ({self.label})>"
 

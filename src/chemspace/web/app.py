@@ -564,6 +564,28 @@ def create_app(
         need_node(session, node_id)
         return frame_records(session, node_id, min(max(limit, 1), 2000))
 
+    @app.get("/api/sessions/{session_id}/nodes/{node_id}/composition")
+    def get_composition(session_id: str, node_id: str, request: Request, top: int = 25):
+        """Every discrete kind present in this node, per domain -- the full list
+        the top-3 summary only previews."""
+        session = need(session_id, request)
+        node = need_node(session, node_id)
+        t = min(max(top, 1), 200)
+        out = []
+        for name in session.domains.names:
+            dom = session.domains[name]
+            sections = dom.composition(node.compound_ids, top=t)
+            if sections:
+                out.append(
+                    {
+                        "domain": dom.label,
+                        "name": name,
+                        "current": name == node.domain,
+                        "sections": sections,
+                    }
+                )
+        return out
+
     # ------------------------------------------------------------- compound
 
     # Not session-scoped: a compound's structure and properties are the same

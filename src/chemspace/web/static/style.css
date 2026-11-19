@@ -243,3 +243,19 @@ tr.special td { color: var(--muted); font-style: italic; }
 }
 #hovercard .hc-props { font-size: 12px; color: var(--muted); }
 #hovercard .hc-cluster { font-size: 12px; color: var(--accent); margin-top: 2px; }
+
+/* 구성 종류 panel: per-domain blocks, each a list of kinds with counts. */
+.comp-domain { margin-bottom: 18px; }
+.comp-domain h4 { margin: 0 0 8px; font-size: 14px; font-weight: 650; }
+.comp-section { margin: 0 0 12px; }
+.comp-title {
+  font-size: 12px; font-weight: 600; color: var(--ink);
+  padding-bottom: 3px; margin-bottom: 4px; border-bottom: 1px solid var(--line);
+}
+.comp-title .muted { font-weight: 400; margin-left: 4px; }
+.comp-row {
+  display: flex; align-items: baseline; gap: 8px;
+  font-size: 12px; padding: 1px 0;
+}
+.comp-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.comp-count { flex: none; color: var(--muted); font-variant-numeric: tabular-nums; }

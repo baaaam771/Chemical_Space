@@ -209,6 +209,17 @@ def test_compound_endpoints_require_login(anon):
     assert anon.get("/api/compound/anything/structure.svg").status_code == 401
 
 
+def test_composition_endpoint_returns_a_list(client):
+    sid, node_id = make_root(client)
+    r = client.get(f"/api/sessions/{sid}/nodes/{node_id}/composition")
+    assert r.status_code == 200
+    assert isinstance(r.json(), list)  # fake domains add no sections; shape still holds
+
+
+def test_composition_requires_login(anon):
+    assert anon.get("/api/sessions/x/nodes/y/composition").status_code == 401
+
+
 def test_select_narrows_and_switch_preserves(client):
     sid, root = make_root(client)
 
