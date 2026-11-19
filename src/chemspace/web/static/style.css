@@ -333,3 +333,11 @@ tr.special td { color: var(--muted); font-style: italic; }
 }
 .rep-struct:hover { border-color: var(--accent); }
 #cmodal .chip b { font-weight: 650; }
+
+/* Persistent note that the tab values are relative to the current node. */
+.tabs-note {
+  font-size: 12px; line-height: 1.5; color: var(--muted);
+  background: var(--panel); border-left: 3px solid var(--accent);
+  padding: 7px 12px; margin: 8px 12px 0;
+}
+.tabs-note b { color: var(--ink); font-weight: 600; }
