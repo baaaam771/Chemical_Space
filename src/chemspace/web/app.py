@@ -589,6 +589,15 @@ def create_app(
         need_node(session, node_id)
         return table_records(session.describe(node_id))
 
+    @app.get("/api/sessions/{session_id}/nodes/{node_id}/clusters/{cluster_id}")
+    def get_cluster_card(session_id: str, node_id: str, cluster_id: int, request: Request):
+        session = need(session_id, request)
+        need_node(session, node_id)
+        try:
+            return session.cluster_card(node_id, cluster_id)
+        except KeyError:
+            raise HTTPException(404, f"no cluster {cluster_id} in {node_id}") from None
+
     @app.get("/api/sessions/{session_id}/nodes/{node_id}/compounds")
     def get_compounds(session_id: str, node_id: str, request: Request, limit: int = 200):
         session = need(session_id, request)

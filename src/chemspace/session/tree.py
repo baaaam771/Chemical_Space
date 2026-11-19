@@ -464,6 +464,47 @@ class ExplorationSession:
             df["비고"] = df["비고"].fillna("")
         return df.fillna("")
 
+    def cluster_card(self, node_id: str, cluster_id: int) -> dict:
+        """One cluster read in depth, for the cluster card: what is
+        over-represented in it versus the whole node (the thing that actually
+        characterises it), a few central example compounds, and its physchem
+        range.
+        """
+        node = self.node(node_id)
+        p = node.placement
+        cid = int(cluster_id)
+        mask = p.labels == cid
+        member_ids = [c for c, m in zip(p.compound_ids, mask) if m]
+        if not member_ids:
+            raise KeyError(f"no cluster {cid} in node {node_id}")
+        kind = "noise" if cid == -1 else "uncovered" if cid == UNCOVERED else "cluster"
+
+        reps: list[str] = []
+        if kind == "cluster":
+            # The compounds nearest the cluster's centre read as its typical
+            # examples; show their structures.
+            coords = p.coords[mask]
+            centroid = coords.mean(axis=0)
+            order = np.argsort(((coords - centroid) ** 2).sum(axis=1))[:6]
+            reps = [member_ids[int(i)] for i in order]
+
+        enriched = []
+        for name in self.domains.names:
+            if name in ("physchem", "moiety"):
+                continue  # continuous, or shown as the representative structures
+            items = _enriched_terms(self.domains[name], member_ids, node.compound_ids)
+            if items:
+                enriched.append({"domain": self.domains[name].label, "items": items})
+
+        return {
+            "cluster": cid,
+            "n": len(member_ids),
+            "kind": kind,
+            "representatives": reps,
+            "enriched": enriched,
+            "physchem": _physchem_range(self.ds.frame(member_ids)),
+        }
+
     def describe(self, node_id: str, domains: Sequence[str] | None = None) -> pd.DataFrame:
         """What this whole selection looks like under *every* domain at once.
 
@@ -634,6 +675,74 @@ def _default_profile_domains(current: str, registry: DomainRegistry) -> list[str
         if extra in registry and extra not in want:
             want.append(extra)
     return want
+
+
+def _enriched_terms(
+    dom,
+    cluster_ids: Sequence[str],
+    node_ids: Sequence[str],
+    top: int = 5,
+    min_frac: float = 0.12,
+    min_count: int = 2,
+    min_ratio: float = 1.3,
+) -> list[dict]:
+    """Terms that are over-represented in the cluster versus the whole node.
+
+    The top term of a cluster is often the top term of the node too (every
+    cluster in an oncology set leads with "Neoplasms"); the *ratio* of the
+    cluster's rate to the node's rate is what tells clusters apart. Guarded by a
+    support floor so a term carried by two compounds does not top the list.
+    """
+    cc = dom.term_counts(cluster_ids)
+    if not cc:
+        return []
+    nc = dom.term_counts(node_ids) or {}
+    ncl = max(len(cluster_ids), 1)
+    nnode = max(len(node_ids), 1)
+    scored = []
+    for term, c in cc.items():
+        if c < min_count:
+            continue
+        cfrac = c / ncl
+        if cfrac < min_frac:
+            continue
+        nfrac = nc.get(term, 0) / nnode
+        ratio = cfrac / nfrac if nfrac > 0 else float("inf")
+        if ratio < min_ratio:
+            continue
+        scored.append((term, cfrac, nfrac, ratio))
+    scored.sort(key=lambda r: (r[3], r[1]), reverse=True)
+    return [
+        {
+            "name": t.split(":", 1)[-1] if ":" in t else t,
+            "cluster_pct": round(cfrac * 100),
+            "node_pct": round(nfrac * 100, 1),
+        }
+        for t, cfrac, nfrac, _ in scored[:top]
+    ]
+
+
+_CARD_PHYSCHEM = ("mw", "clogp", "tpsa", "qed", "hbd", "hba", "rotb", "fsp3")
+
+
+def _physchem_range(df) -> list[dict]:
+    """Median and inter-quartile range of each key descriptor over a cluster."""
+    out = []
+    for col in _CARD_PHYSCHEM:
+        if col not in df.columns:
+            continue
+        s = df[col].dropna()
+        if s.empty:
+            continue
+        out.append(
+            {
+                "name": col,
+                "median": round(float(s.median()), 2),
+                "p25": round(float(s.quantile(0.25)), 2),
+                "p75": round(float(s.quantile(0.75)), 2),
+            }
+        )
+    return out
 
 
 def _jsonable(obj):

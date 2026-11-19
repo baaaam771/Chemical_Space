@@ -14,6 +14,7 @@ then occupy regions you can actually select.
 
 from __future__ import annotations
 
+from collections import Counter
 from typing import Sequence
 
 import numpy as np
@@ -222,6 +223,9 @@ class DiseaseDomain(_DatasetDomain):
             out.append(_section("치료영역 (ATC)", atc, top))
         return out
 
+    def term_counts(self, compound_ids: Sequence[str]) -> dict:
+        return Counter(t for c in compound_ids for t in self.ds.disease_terms.get(c, ()))
+
 
 # --------------------------------------------------------------------------- #
 
@@ -290,6 +294,9 @@ class TargetDomain(_DatasetDomain):
         if len(l2):
             out.append(_section("단백질 계열 L2", l2, top))
         return out
+
+    def term_counts(self, compound_ids: Sequence[str]) -> dict:
+        return Counter(t for c in compound_ids for t in self.ds.target_terms.get(c, ()))
 
 
 # --------------------------------------------------------------------------- #
@@ -431,3 +438,6 @@ class ModalityDomain(_DatasetDomain):
     def composition(self, compound_ids: Sequence[str], top: int = 25) -> list[dict]:
         counts = self.ds.frame(compound_ids)["modality"].value_counts()
         return [_section("모달리티", counts, top)] if len(counts) else []
+
+    def term_counts(self, compound_ids: Sequence[str]) -> dict:
+        return Counter(f"MOD:{m}" for m in self.ds.frame(compound_ids)["modality"])

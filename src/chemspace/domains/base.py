@@ -128,6 +128,15 @@ class Domain(ABC):
         """
         return []
 
+    def term_counts(self, compound_ids: Sequence[str]) -> dict | None:
+        """How many of these compounds carry each discrete term, for enrichment
+        (a cluster card asks what is over-represented here versus the node).
+
+        ``None`` for a continuous domain with no terms. Terms keep their source
+        prefix so the caller can strip it for display.
+        """
+        return None
+
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"<Domain {self.name} ({self.label})>"
 

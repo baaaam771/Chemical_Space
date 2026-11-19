@@ -225,6 +225,29 @@ def test_composition_requires_login(anon):
     assert anon.get("/api/sessions/x/nodes/y/composition").status_code == 401
 
 
+def test_cluster_card_returns_shape(client):
+    sid, node_id = make_root(client)
+    pts = client.get(f"/api/sessions/{sid}/nodes/{node_id}/points").json()
+    clusters = [c for c in pts["cluster"] if c >= 0]
+    assert clusters, "root should have at least one real cluster"
+    cid = clusters[0]
+    card = client.get(f"/api/sessions/{sid}/nodes/{node_id}/clusters/{cid}").json()
+    assert card["cluster"] == cid
+    assert card["n"] >= 1
+    for key in ("representatives", "enriched", "physchem", "kind"):
+        assert key in card
+    assert len(card["representatives"]) <= 6
+
+
+def test_cluster_card_unknown_is_404(client):
+    sid, node_id = make_root(client)
+    assert client.get(f"/api/sessions/{sid}/nodes/{node_id}/clusters/999").status_code == 404
+
+
+def test_cluster_card_requires_login(anon):
+    assert anon.get("/api/sessions/x/nodes/y/clusters/0").status_code == 401
+
+
 def test_select_narrows_and_switch_preserves(client):
     sid, root = make_root(client)
 

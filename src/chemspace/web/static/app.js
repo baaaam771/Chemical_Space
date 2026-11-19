@@ -138,7 +138,7 @@ function colourPoints(pts) {
     [...counts.keys()].filter((c) => c >= 0).sort((a, b) => a - b)
       .forEach((c) => {
         const label = state.clusterLabels ? state.clusterLabels[c] : "";
-        legend.set(`군집 ${c}`, [PALETTE[c % PALETTE.length], counts.get(c), label || ""]);
+        legend.set(`군집 ${c}`, [PALETTE[c % PALETTE.length], counts.get(c), label || "", c]);
       });
     if (counts.has(NOISE)) legend.set("noise", [NOISE_COLOR, counts.get(NOISE)]);
     if (counts.has(UNCOVERED)) legend.set("데이터 없음", [UNCOVERED_COLOR, counts.get(UNCOVERED)]);
@@ -157,12 +157,15 @@ function colourPoints(pts) {
 
 function renderLegend(legend) {
   const rows = [...legend.entries()].slice(0, 30).map(
-    ([name, [color, count, label]]) => {
+    ([name, [color, count, label, cid]]) => {
       const tag = label
         ? `<span class="legend-label" title="${escapeHtml(label)}">${escapeHtml(label)}</span>`
         : "";
+      const clickable = cid != null && cid >= 0;
       return (
-        `<div class="legend-row" title="${escapeHtml(label || name)}">` +
+        `<div class="legend-row${clickable ? " legend-clickable" : ""}"` +
+        (clickable ? ` data-cluster="${cid}"` : "") +
+        ` title="${clickable ? "클릭하면 군집 특징 보기 — " : ""}${escapeHtml(label || name)}">` +
         `<span class="swatch" style="background:${color}"></span>` +
         `<span class="legend-name">${escapeHtml(name)}</span>` +
         tag +
@@ -314,6 +317,70 @@ async function openCompoundModal(cid) {
 function closeCompoundModal() {
   const b = $("cmodal-backdrop");
   if (b) b.hidden = true;
+}
+
+/* The cluster card: what is over-represented in this cluster versus the whole
+ * node (its distinguishing features), a few central example structures, and its
+ * physchem range. Opened from a legend row or a 군집 프로파일 row. */
+async function openClusterCard(cid) {
+  if (cid == null || cid === "" || !state.nodeId) return;
+  const backdrop = $("cmodal-backdrop");
+  const box = $("cmodal");
+  box.innerHTML = '<div class="muted">불러오는 중…</div>';
+  backdrop.hidden = false;
+  try {
+    const c = await api(`/api/sessions/${state.sessionId}/nodes/${state.nodeId}/clusters/${cid}`);
+    box.innerHTML = renderClusterCard(c);
+  } catch (e) {
+    box.innerHTML = '<div class="muted">불러오지 못했습니다.</div>';
+  }
+}
+
+function renderClusterCard(c) {
+  const chip = (it) =>
+    `<span class="chip" title="${escapeHtml(it.name)} — 군집 ${it.cluster_pct}% vs 전체 ${it.node_pct}%">` +
+    `${escapeHtml(it.name)} <b>${it.cluster_pct}%</b>` +
+    `<span class="muted"> / 전체 ${it.node_pct}%</span></span>`;
+  const enriched = (c.enriched || [])
+    .map(
+      (s) =>
+        `<div class="cmodal-sec"><h4>${escapeHtml(s.domain)} ` +
+        `<span class="muted">두드러짐</span></h4>` +
+        `<div class="cmodal-chips">${s.items.map(chip).join("")}</div></div>`
+    )
+    .join("");
+  const reps = (c.representatives || [])
+    .map(
+      (id) =>
+        `<img class="rep-struct" data-cid="${escapeHtml(id)}" title="${escapeHtml(id)}" ` +
+        `src="/api/compound/${encodeURIComponent(id)}/structure.svg" ` +
+        `onerror="this.style.display='none'">`
+    )
+    .join("");
+  const phys = (c.physchem || [])
+    .map(
+      (p) =>
+        `<div><div class="k">${escapeHtml(p.name)}</div>` +
+        `<div class="v">${p.median} <span class="muted">(${p.p25}–${p.p75})</span></div></div>`
+    )
+    .join("");
+  const title =
+    c.kind === "noise" ? "노이즈" : c.kind === "uncovered" ? "데이터 없음" : `군집 ${c.cluster}`;
+  return (
+    `<div class="cmodal-head"><div class="cmodal-id"><h3>${escapeHtml(title)}</h3>` +
+    `<div class="sub">${Number(c.n).toLocaleString()}개 화합물</div></div>` +
+    `<button id="cmodal-close" title="닫기">×</button></div>` +
+    (enriched ||
+      '<div class="cmodal-empty">전체 대비 두드러지는 주석이 없습니다 (주로 구조·물성으로 묶인 군집).</div>') +
+    (reps
+      ? `<div class="cmodal-sec"><h4>대표 구조 <span class="muted">(중심에 가까운 예시 · 클릭하면 상세)</span></h4>` +
+        `<div class="rep-grid">${reps}</div></div>`
+      : "") +
+    (phys
+      ? `<div class="cmodal-sec"><h4>물성 <span class="muted">중앙값 (사분위 범위)</span></h4>` +
+        `<div class="cmodal-grid">${phys}</div></div>`
+      : "")
+  );
 }
 
 function renderCompoundDetail(r) {
@@ -637,11 +704,20 @@ function renderTable(rows, container) {
       const num = typeof v === "number";
       return `<td class="${num ? "num" : ""}">${escapeHtml(v === null ? "" : v)}</td>`;
     }).join("");
-    // Rows that carry a compound id (the 화합물 table) open the detail modal.
+    // Rows that carry a compound id (화합물 table) open the compound detail;
+    // rows that carry a real cluster id (군집 프로파일) open the cluster card.
     const cid = r.chembl_id;
-    const cls = `${special ? "special" : ""}${cid ? " row-compound" : ""}`.trim();
-    const attr = cid ? ` data-cid="${escapeHtml(String(cid))}"` : "";
-    return `<tr class="${cls}"${attr}>${tds}</tr>`;
+    const clu = typeof r.cluster === "number" && r.cluster >= 0 ? r.cluster : null;
+    let cls = special ? "special" : "";
+    let attr = "";
+    if (cid) {
+      cls += " row-compound";
+      attr = ` data-cid="${escapeHtml(String(cid))}"`;
+    } else if (clu != null) {
+      cls += " row-cluster";
+      attr = ` data-cluster="${clu}"`;
+    }
+    return `<tr class="${cls.trim()}"${attr}>${tds}</tr>`;
   }).join("");
   el.innerHTML = `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
 }
@@ -938,18 +1014,30 @@ function wire() {
   });
   setTabHelp("describe");  // the tab that starts active
 
-  // A row in the 화합물 table opens the same detail modal as a map point click.
+  // A row in the 화합물 table opens the compound detail; a 군집 프로파일 row or a
+  // legend row opens the cluster card.
   $("panel-compounds").addEventListener("click", (e) => {
     const tr = e.target.closest("tr[data-cid]");
     if (tr) openCompoundModal(tr.dataset.cid);
   });
+  $("panel-clusters").addEventListener("click", (e) => {
+    const tr = e.target.closest("tr[data-cluster]");
+    if (tr) openClusterCard(tr.dataset.cluster);
+  });
+  $("legend").addEventListener("click", (e) => {
+    const row = e.target.closest("[data-cluster]");
+    if (row) openClusterCard(row.dataset.cluster);
+  });
 
-  // Close the detail modal: backdrop click, the × button, or Escape.
+  // Close the detail modal: backdrop click, the × button, or Escape. A
+  // representative structure inside the cluster card opens that compound.
   $("cmodal-backdrop").addEventListener("click", (e) => {
     if (e.target.id === "cmodal-backdrop") closeCompoundModal();
   });
   $("cmodal").addEventListener("click", (e) => {
-    if (e.target.id === "cmodal-close") closeCompoundModal();
+    if (e.target.id === "cmodal-close") return closeCompoundModal();
+    const rep = e.target.closest(".rep-struct");
+    if (rep && rep.dataset.cid) openCompoundModal(rep.dataset.cid);
   });
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") closeCompoundModal();
