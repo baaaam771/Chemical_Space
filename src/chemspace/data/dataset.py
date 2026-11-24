@@ -180,6 +180,10 @@ class Dataset:
         rows = np.array([order[c] for c in compounds.index], dtype=int)
         fps, sfps = fps[rows], sfps[rows]
 
+        # Display overlays (labels, not domains): colour/filter any map by them.
+        for col, series in cls._overlay_columns(compounds, mechs).items():
+            compounds[col] = series
+
         targets = cls._target_table(
             mechs, acts, tgts, pcs, keep=set(compounds.index)
         )
@@ -300,6 +304,53 @@ class Dataset:
             .drop_duplicates(["chembl_id", "target_chembl_id"])
         )
         return best.groupby("chembl_id", group_keys=False, sort=False).head(cap)
+
+    @staticmethod
+    def _overlay_columns(
+        compounds: pd.DataFrame, mechs: pd.DataFrame
+    ) -> dict[str, object]:
+        """Per-compound display overlays: MoA, development stage, safety flag.
+
+        These are *labels*, not feature spaces, so they are deliberately not
+        domains -- embedding a k-value label makes a map of k identical points
+        (the lesson the modality domain is built around). They ride along as
+        fields the UI can colour or filter any existing map by. All three are
+        read from columns the snapshot already ships, so nothing is
+        re-extracted; the sparse ones (MoA, stage) are simply blank where ChEMBL
+        has no annotation, which the UI shows as 미분류.
+        """
+        idx = compounds.index
+
+        def num(col: str) -> pd.Series:
+            if col not in compounds.columns:
+                return pd.Series(np.nan, index=idx)
+            return pd.to_numeric(compounds[col], errors="coerce")
+
+        # Development stage from ChEMBL max_phase: 4 approved, >0 clinical, else pre.
+        phase = num("max_phase")
+        dev_stage = np.select(
+            [phase >= 4, phase > 0], ["승인", "임상"], default="전임상/미상"
+        )
+
+        # Safety flags; a withdrawal is the stronger statement, so it wins.
+        wd = num("withdrawn_flag").fillna(0)
+        bb = num("black_box_warning").fillna(0)
+        safety = np.select([wd == 1, bb == 1], ["시판중단", "블랙박스경고"], default="")
+
+        # Coarse MoA: the compound's first curated action_type (INHIBITOR -> Inhibitor).
+        if "action_type" in mechs.columns:
+            moa_s = (
+                mechs.dropna(subset=["action_type"])
+                .drop_duplicates("chembl_id")
+                .set_index("chembl_id")["action_type"]
+                .astype(str)
+                .str.title()
+            )
+            moa = moa_s.reindex(idx).fillna("").to_numpy()
+        else:
+            moa = np.full(len(idx), "", dtype=object)
+
+        return {"moa": moa, "dev_stage": dev_stage, "safety": safety}
 
     @staticmethod
     def _disease_terms(

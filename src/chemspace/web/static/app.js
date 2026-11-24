@@ -264,6 +264,14 @@ function showHoverCard(ev) {
       (name ? `<div class="hc-name">${escapeHtml(name)}</div>` : "") +
       `<div class="hc-props">${escapeHtml(pts.modality[i])} · ` +
       `MW ${pts.mw[i]} · cLogP ${pts.clogp[i]}</div>` +
+      ((() => {
+        const ov = [
+          pts.moa && pts.moa[i],
+          pts.dev_stage && pts.dev_stage[i],
+          pts.safety && pts.safety[i],
+        ].filter(Boolean).join(" · ");
+        return ov ? `<div class="hc-props">${escapeHtml(ov)}</div>` : "";
+      })()) +
       `<div class="hc-cluster">${clLabel}</div>` +
       `</div>`;
   }

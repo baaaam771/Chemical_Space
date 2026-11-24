@@ -136,6 +136,10 @@ def node_points(session, node: Node) -> dict:
         "mw": [round(float(v), 1) for v in df["mw"]],
         "clogp": [round(float(v), 2) for v in df["clogp"]],
     }
+    # Label overlays the UI can colour/filter any map by (MoA, stage, safety).
+    for col in ("moa", "dev_stage", "safety"):
+        if col in df.columns:
+            out[col] = [str(v) for v in df[col]]
     if "domain_label" in df.columns:
         out["domain_label"] = [str(v) for v in df["domain_label"]]
     return out

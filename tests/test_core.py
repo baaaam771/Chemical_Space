@@ -1166,3 +1166,40 @@ def test_target_seq_registered_only_when_embeddings_present():
     # description comes from target tokens, not the embedding vectors
     prof = dom.profile(["C0000", "C0002"])
     assert "Protein" in prof["summary"]
+
+
+def test_overlay_columns_derive_moa_stage_safety():
+    from chemspace.data.dataset import Dataset
+
+    ids = ["C0", "C1", "C2", "C3", "C4"]
+    compounds = pd.DataFrame(
+        {
+            "max_phase": [4.0, 2.0, np.nan, -1.0, 0.5],   # approved/clinical/pre/pre/clinical
+            "withdrawn_flag": [0, 0, 0, 1, 0],            # C3 withdrawn
+            "black_box_warning": [1, 0, 0, 1, 0],         # C0 warning; C3 both -> withdrawn wins
+        },
+        index=ids,
+    )
+    mechs = pd.DataFrame(
+        {
+            "chembl_id": ["C0", "C0", "C1"],              # C0 first action_type wins
+            "action_type": ["INHIBITOR", "AGONIST", "ANTAGONIST"],
+        }
+    )
+    out = Dataset._overlay_columns(compounds, mechs)
+
+    assert list(out["dev_stage"]) == ["승인", "임상", "전임상/미상", "전임상/미상", "임상"]
+    assert list(out["safety"]) == ["블랙박스경고", "", "", "시판중단", ""]
+    assert list(out["moa"]) == ["Inhibitor", "Antagonist", "", "", ""]
+
+
+def test_overlay_columns_tolerate_missing_source_columns():
+    from chemspace.data.dataset import Dataset
+
+    compounds = pd.DataFrame(index=["C0", "C1"])  # no max_phase / flags
+    mechs = pd.DataFrame(columns=["chembl_id"])   # no action_type
+    out = Dataset._overlay_columns(compounds, mechs)
+
+    assert list(out["dev_stage"]) == ["전임상/미상", "전임상/미상"]
+    assert list(out["safety"]) == ["", ""]
+    assert list(out["moa"]) == ["", ""]
