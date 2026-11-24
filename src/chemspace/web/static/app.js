@@ -15,6 +15,7 @@ const PALETTE = [
 ];
 const NOISE = -1, UNCOVERED = -2;
 const NOISE_COLOR = "#C9CDD4", UNCOVERED_COLOR = "#E8EAED";
+const MUTED_COLOR = "#B4B8C0"; // 미분류 / no known family
 
 const state = {
   sessionId: null,
@@ -210,7 +211,44 @@ function colourPoints(pts) {
     const counts = new Map();
     values.forEach((v) => counts.set(v, (counts.get(v) || 0) + 1));
     const order = [...counts.entries()].sort((a, b) => b[1] - a[1]);
-    const map = new Map(order.map(([k], i) => [k, PALETTE[i % PALETTE.length]]));
+
+    // Colour scheme. For a hierarchy (L1/L2), assign each L1 family a FIXED hue
+    // and each L2 child a shade of its parent's hue, so a family reads as one
+    // colour group and the same family keeps its colour across maps. For a flat
+    // overlay, colour by frequency rank as before. (The old code always used the
+    // rank path, so L2 children got unrelated palette colours that recycled every
+    // 20 values -- a family looked like confetti and colours repeated across
+    // families.)
+    const cdom = colorDomainOf(state.colorDomain);
+    const rollup = activeRollupDomain(pts); // L2 view with its L1 parent present
+    let map;
+    let baseOf = null;
+    let childParent = null;
+    if (rollup) {
+      const parents = pts[rollup.l1].map((v) => v || "미분류");
+      childParent = new Map();
+      values.forEach((c, i) => childParent.set(c, parents[i]));
+      // Fixed base colour per family (stable order -> stable colour across maps).
+      baseOf = new Map([...new Set(parents)].sort().map((p, i) => [p, familyColor(p, i)]));
+      const kidsByParent = new Map();
+      order.forEach(([child]) => {
+        const p = childParent.get(child) || "미분류";
+        if (!kidsByParent.has(p)) kidsByParent.set(p, []);
+        kidsByParent.get(p).push(child);
+      });
+      map = new Map();
+      kidsByParent.forEach((kids, p) =>
+        kids.forEach((child, i) => map.set(child, shadeOf(baseOf.get(p), i, kids.length)))
+      );
+    } else if (cdom && cdom.l2 && state.colorBy === cdom.l1) {
+      // Top level (상위) of a hierarchy: one fixed colour per family.
+      map = new Map([...counts.keys()].sort().map((k, i) => [k, familyColor(k, i)]));
+    } else {
+      map = new Map(
+        order.map(([k], i) => [k, k === "미분류" ? MUTED_COLOR : PALETTE[i % PALETTE.length]])
+      );
+    }
+
     colors = values.map((v) => map.get(v));
     order.forEach(([k, n]) => legend.set(k, [map.get(k), n]));
     // Visual filter: when some values are isolated, the rest fade to a faint
@@ -224,16 +262,14 @@ function colourPoints(pts) {
       // isolated points legible even where compounds crowd together.
       sizes = values.map((v) => (state.isolate.has(v) ? base + 1 : Math.max(2, base - 3)));
     }
-    // Roll-up: when the field is an L2, group its legend rows under the L1 each
-    // point belongs to, with an L1 subtotal that sums its children -- the
-    // containment made visible. Parent comes straight from the per-point L1.
-    const dom = activeRollupDomain(pts);
-    if (dom) {
-      const parents = pts[dom.l1].map((v) => v || "미분류");
-      const childParent = new Map();
+    // Roll-up: group the L2 legend rows under the L1 each point belongs to, with
+    // an L1 subtotal that sums its children -- the containment made visible. The
+    // parent carries its base hue so the legend reads as coloured family headers.
+    if (rollup) {
       const parentCount = new Map();
-      values.forEach((c, i) => childParent.set(c, parents[i]));
-      parents.forEach((p) => parentCount.set(p, (parentCount.get(p) || 0) + 1));
+      pts[rollup.l1]
+        .map((v) => v || "미분류")
+        .forEach((p) => parentCount.set(p, (parentCount.get(p) || 0) + 1));
       const kids = new Map();
       order.forEach(([child, n]) => {
         const p = childParent.get(child);
@@ -242,7 +278,7 @@ function colourPoints(pts) {
       });
       groups = [...parentCount.entries()]
         .sort((a, b) => b[1] - a[1])
-        .map(([p, pc]) => ({ parent: p, count: pc, children: kids.get(p) || [] }));
+        .map(([p, pc]) => ({ parent: p, count: pc, color: baseOf.get(p), children: kids.get(p) || [] }));
     }
   }
   return { colors, legend, groups, sizes };
@@ -260,6 +296,63 @@ function dimColor(hex, alpha = 0.16) {
   const [r, g, b] = [1, 2, 3].map((i) => parseInt(m[i], 16));
   const mix = (c) => Math.round(c * 0.35 + 150 * 0.65);
   return `rgba(${mix(r)},${mix(g)},${mix(b)},${alpha})`;
+}
+
+/* Hierarchical colouring: a fixed base hue per L1 family, shades of it per L2.
+ * A family then reads as one colour group, and the same family keeps its colour
+ * across maps (stable order -> stable index), instead of frequency-rank colours
+ * that recycle a 20-colour palette and repeat across families. */
+const _clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+function familyColor(name, index) {
+  return name === "미분류" ? MUTED_COLOR : PALETTE[index % PALETTE.length];
+}
+
+function hexToHsl(hex) {
+  const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex);
+  if (!m) return { h: 0, s: 0, l: 60 };
+  const [r, g, b] = [1, 2, 3].map((i) => parseInt(m[i], 16) / 255);
+  const max = Math.max(r, g, b), min = Math.min(r, g, b), d = max - min;
+  const l = (max + min) / 2;
+  let h = 0, s = 0;
+  if (d) {
+    s = d / (1 - Math.abs(2 * l - 1));
+    if (max === r) h = ((g - b) / d) % 6;
+    else if (max === g) h = (b - r) / d + 2;
+    else h = (r - g) / d + 4;
+    h = (h * 60 + 360) % 360;
+  }
+  return { h, s: s * 100, l: l * 100 };
+}
+
+function hslToHex(h, s, l) {
+  s /= 100; l /= 100;
+  const c = (1 - Math.abs(2 * l - 1)) * s;
+  const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+  const m = l - c / 2;
+  let r = 0, g = 0, b = 0;
+  if (h < 60) [r, g, b] = [c, x, 0];
+  else if (h < 120) [r, g, b] = [x, c, 0];
+  else if (h < 180) [r, g, b] = [0, c, x];
+  else if (h < 240) [r, g, b] = [0, x, c];
+  else if (h < 300) [r, g, b] = [x, 0, c];
+  else [r, g, b] = [c, 0, x];
+  const to = (v) => Math.round((v + m) * 255).toString(16).padStart(2, "0");
+  return `#${to(r)}${to(g)}${to(b)}`;
+}
+
+/* A distinguishable shade of a family's base hue: member i of n, spread over a
+ * small analogous arc plus a brightness ramp so even ~12 subfamilies stay apart
+ * while still reading as one colour family. */
+function shadeOf(baseHex, i, n) {
+  if (n <= 1) return baseHex;
+  const { h, s, l } = hexToHsl(baseHex);
+  const t = i / (n - 1) - 0.5; // -0.5 .. 0.5
+  return hslToHex(
+    (h + t * 34 + 360) % 360,
+    _clamp(s - Math.abs(t) * 8, 22, 96),
+    _clamp(l + t * 28, 30, 80)
+  );
 }
 
 function renderLegend(legend, groups) {
@@ -287,6 +380,7 @@ function renderLegend(legend, groups) {
         `<div class="legend-row legend-group legend-clickable${anyOn ? "" : " legend-off"}"` +
         ` data-group="${escapeHtml(JSON.stringify(kids))}"` +
         ` title="클릭하면 이 상위 분류 전체를 밝게 — ${escapeHtml(g.parent)}">` +
+        `<span class="swatch" style="background:${g.color || MUTED_COLOR}"></span>` +
         `<span class="legend-name">${escapeHtml(g.parent)}</span>` +
         `<span class="count">${g.count.toLocaleString()}</span></div>`
       );
