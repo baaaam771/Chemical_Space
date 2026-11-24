@@ -183,8 +183,13 @@ class Dataset:
         # Display overlays (labels, not domains): colour/filter any map by them.
         for col, series in cls._overlay_columns(compounds, mechs).items():
             compounds[col] = series
-        # 구조알림: the one overlay computed (not derived) -- read its cache.
-        compounds["struct_alert"] = cls._structural_alerts(snap, compounds.index)
+        # Computed overlays read from their per-snapshot caches (blank if absent).
+        compounds["struct_alert"] = cls._computed_label(
+            snap, "structural_alerts.parquet", "struct_alert", compounds.index
+        )
+        compounds["novelty"] = cls._computed_label(
+            snap, "novelty.parquet", "novelty", compounds.index
+        )
 
         targets = cls._target_table(
             mechs, acts, tgts, pcs, keep=set(compounds.index)
@@ -441,20 +446,20 @@ class Dataset:
         }
 
     @staticmethod
-    def _structural_alerts(snap: Path, idx: pd.Index) -> pd.Series:
-        """Per-compound 구조알림 label from the ``structural_alerts.parquet`` cache.
+    def _computed_label(snap: Path, filename: str, column: str, idx: pd.Index) -> pd.Series:
+        """A per-compound computed-overlay label from its per-snapshot cache.
 
-        A pure function of SMILES, cached per snapshot because the RDKit
-        FilterCatalog pass is minutes over the whole set (see
-        ``scripts/build_structural_alerts.py``). A snapshot built before this
-        cache existed simply gets a blank column, so it still loads -- the
-        overlay is then empty until the script is run.
+        구조알림 and 신규성 are *computed* (not in ChEMBL), so each is built once
+        by its ``scripts/build_*.py`` into a parquet keyed by ``chembl_id`` and
+        merged here. A snapshot built before a cache existed simply gets a blank
+        column -- it still loads, the overlay is just empty until the script is
+        run. Compounds absent from the cache also stay blank.
         """
-        path = snap / "structural_alerts.parquet"
+        path = snap / filename
         if not path.exists():
             return pd.Series("", index=idx, dtype=object)
-        df = pd.read_parquet(path, columns=["chembl_id", "struct_alert"])
-        s = df.set_index("chembl_id")["struct_alert"].astype(str)
+        df = pd.read_parquet(path, columns=["chembl_id", column])
+        s = df.set_index("chembl_id")[column].astype(str)
         return s.reindex(idx).fillna("")
 
     @staticmethod

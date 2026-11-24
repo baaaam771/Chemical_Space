@@ -311,6 +311,7 @@ function showHoverCard(ev) {
           pts.dev_stage && pts.dev_stage[i],
           pts.safety && pts.safety[i],
           pts.struct_alert && pts.struct_alert[i] && `알림:${pts.struct_alert[i]}`,
+          pts.novelty && pts.novelty[i] && `신규성:${pts.novelty[i]}`,
         ].filter(Boolean).join(" · ");
         return ov ? `<div class="hc-props">${escapeHtml(ov)}</div>` : "";
       })()) +

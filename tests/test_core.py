@@ -1245,17 +1245,44 @@ def test_structural_alert_label_and_priority():
     assert label_from({"PAINS": False, "NIH": False, "BRENK": False}) == ""
 
 
-def test_structural_alerts_cache_optional(tmp_path):
+def test_computed_label_cache_optional(tmp_path):
     from chemspace.data.dataset import Dataset
 
     idx = pd.Index(["C0", "C1", "C2"])
     # No cache file -> blank column, so a pre-cache snapshot still loads.
-    blank = Dataset._structural_alerts(tmp_path, idx)
+    blank = Dataset._computed_label(tmp_path, "structural_alerts.parquet", "struct_alert", idx)
     assert list(blank) == ["", "", ""]
 
     # With a cache, labels map by chembl_id; ids absent from it stay blank.
     pd.DataFrame(
         {"chembl_id": ["C0", "C2"], "struct_alert": ["PAINS", "Brenk"]}
     ).to_parquet(tmp_path / "structural_alerts.parquet", index=False)
-    got = Dataset._structural_alerts(tmp_path, idx)
+    got = Dataset._computed_label(tmp_path, "structural_alerts.parquet", "struct_alert", idx)
     assert list(got) == ["PAINS", "", "Brenk"]
+
+
+def test_novelty_tier_thresholds():
+    from chemspace.data import novelty
+
+    # 기존 >=0.7, 중간 [0.4,0.7), 신규 <0.4, blank when unknown.
+    assert novelty.novelty_tier(1.0) == novelty.LABEL_KNOWN
+    assert novelty.novelty_tier(0.70) == novelty.LABEL_KNOWN
+    assert novelty.novelty_tier(0.55) == novelty.LABEL_MID
+    assert novelty.novelty_tier(0.40) == novelty.LABEL_MID
+    assert novelty.novelty_tier(0.20) == novelty.LABEL_NOVEL
+    assert novelty.novelty_tier(float("nan")) == ""
+    assert novelty.novelty_tier(None) == ""
+
+
+def test_nearest_similarity_self_and_empty_reference():
+    import numpy as np
+    from chemspace.data.novelty import morgan_fps, nearest_similarity
+
+    fps = morgan_fps(["CCO", "c1ccccc1", "not_a_smiles"])
+    # A compound in the reference scores 1.0 against itself; the unparseable
+    # one is NaN; an empty reference leaves everything NaN.
+    sim = nearest_similarity(fps, [fps[0]])
+    assert sim[0] == 1.0
+    assert 0.0 <= sim[1] < 1.0
+    assert np.isnan(sim[2])
+    assert np.all(np.isnan(nearest_similarity(fps, [])))
