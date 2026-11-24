@@ -1177,9 +1177,15 @@ def test_overlay_columns_derive_moa_stage_safety():
             "max_phase": [4.0, 2.0, np.nan, -1.0, 0.5],   # approved/clinical/pre/pre/clinical
             "withdrawn_flag": [0, 0, 0, 1, 0],            # C3 withdrawn
             "black_box_warning": [1, 0, 0, 1, 0],         # C0 warning; C3 both -> withdrawn wins
+            "molecule_type": ["Small molecule", "Small molecule", "Antibody", "Protein", "Small molecule"],
+            "mw": [320.0, 650.0, 150000.0, 1200.0, 280.0],
+            "clogp": [2.0, 6.0, 0.0, 0.0, 2.0],
+            "tpsa": [60.0, 50.0, 0.0, 0.0, 95.0],
+            "covalent_tier": ["none", "none", "none", "none", "none"],
         },
         index=ids,
     )
+    compounds.loc["C0", "covalent_tier"] = "strong"       # C0 inhibitor -> irreversible
     mechs = pd.DataFrame(
         {
             "chembl_id": ["C0", "C0", "C1"],              # C0 first action_type wins
@@ -1194,6 +1200,17 @@ def test_overlay_columns_derive_moa_stage_safety():
     ]
     assert list(out["safety"]) == ["블랙박스경고", "", "", "시판중단", ""]
     assert list(out["moa"]) == ["Inhibitor", "Antagonist", "", "", ""]
+    # MoA L2: C0 INHIBITOR + covalent -> irreversible; C1 ANTAGONIST unchanged
+    assert list(out["moa_l2"]) == ["Irreversible (Covalent) Inhibitor", "Antagonist", "", "", ""]
+    # Modality L2 from type + size
+    assert list(out["modality_l2"]) == [
+        "Synthetic organic (MW<500)", "Macrocycle-like (MW 500-1000)",
+        "mAb/ADC/Bispecific", "Large Biologics", "Synthetic organic (MW<500)",
+    ]
+    # Physicochemical L2 (BCS / bRo5): C4 is small but matches no BCS band
+    assert list(out["physchem_l2"]) == [
+        "BCS1 (고용해·고투과)", "고MW·고지용성", "고MW (>500)", "고MW (>500)", "기타(소분자)",
+    ]
 
 
 def test_overlay_columns_tolerate_missing_source_columns():
@@ -1207,3 +1224,6 @@ def test_overlay_columns_tolerate_missing_source_columns():
     assert list(out["dev_stage_l2"]) == ["전임상/미상", "전임상/미상"]
     assert list(out["safety"]) == ["", ""]
     assert list(out["moa"]) == ["", ""]
+    assert list(out["moa_l2"]) == ["", ""]
+    assert list(out["modality_l2"]) == ["", ""]
+    assert list(out["physchem_l2"]) == ["", ""]  # no descriptors -> 미분류, not a bucket

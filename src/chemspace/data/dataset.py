@@ -344,23 +344,97 @@ class Dataset:
         bb = num("black_box_warning").fillna(0)
         safety = np.select([wd == 1, bb == 1], ["시판중단", "블랙박스경고"], default="")
 
-        # Coarse MoA: the compound's first curated action_type (INHIBITOR -> Inhibitor).
+        # MoA. L1 = the compound's first curated action_type (INHIBITOR -> Inhibitor).
+        # L2 refines only INHIBITOR into reversible/irreversible via the covalent
+        # warhead flag (this snapshot ships no reversibility field); the other
+        # action types (PARTIAL AGONIST, PAM, NAM, …) are already L2-specific.
         if "action_type" in mechs.columns:
-            moa_s = (
+            at = (
                 mechs.dropna(subset=["action_type"])
                 .drop_duplicates("chembl_id")
                 .set_index("chembl_id")["action_type"]
                 .astype(str)
-                .str.title()
+                .reindex(idx)
             )
-            moa = moa_s.reindex(idx).fillna("").to_numpy()
+            moa = at.str.title().fillna("").to_numpy()
+            cov = (
+                (compounds["covalent_tier"] == "strong").to_numpy()
+                if "covalent_tier" in compounds.columns
+                else np.zeros(len(idx), dtype=bool)
+            )
+            is_inh = (at == "INHIBITOR").fillna(False).to_numpy()
+            moa_l2 = np.where(
+                at.isna().to_numpy(),
+                "",
+                np.where(
+                    is_inh,
+                    np.where(cov, "Irreversible (Covalent) Inhibitor", "Reversible Inhibitor"),
+                    at.str.title().fillna("").to_numpy(),
+                ),
+            )
         else:
             moa = np.full(len(idx), "", dtype=object)
+            moa_l2 = np.full(len(idx), "", dtype=object)
+
+        # Modality L2 from molecule_type + size (RDKit mw). Blank molecule_type
+        # (27% of the snapshot) stays 미분류; the structural modality domain still
+        # places those, this only labels them.
+        mtype = (
+            compounds["molecule_type"].fillna("").astype(str).to_numpy()
+            if "molecule_type" in compounds.columns
+            else np.full(len(idx), "", dtype=object)
+        )
+        w = num("mw").to_numpy()
+        sm = mtype == "Small molecule"
+        modality_l2 = np.select(
+            [
+                sm & (w >= 500) & (w <= 1000),
+                sm & (w < 500),
+                mtype == "Antibody",
+                np.isin(mtype, ["Protein", "Peptide"]) & (w > 1000),
+            ],
+            [
+                "Macrocycle-like (MW 500-1000)",
+                "Synthetic organic (MW<500)",
+                "mAb/ADC/Bispecific",
+                "Large Biologics",
+            ],
+            default="",
+        )
+
+        # Physicochemical L2: simplified BCS / bRo5 subclass (RDKit mw/clogp/tpsa),
+        # following the xlsx taxonomy. Blank where no descriptors exist.
+        mw = num("mw").to_numpy()
+        lp = num("clogp").to_numpy()
+        psa = num("tpsa").to_numpy()
+        physchem_l2 = np.select(
+            [
+                (mw <= 500) & (lp >= 1) & (lp <= 3) & (psa <= 90),
+                (mw <= 500) & (lp > 3) & (psa <= 90),
+                (mw <= 500) & (lp <= 1) & (psa > 90),
+                (mw > 500) & (lp > 5),
+                (mw > 500),
+                (lp > 5),
+            ],
+            [
+                "BCS1 (고용해·고투과)",
+                "BCS2 (저용해·고투과)",
+                "BCS3 (고용해·저투과)",
+                "고MW·고지용성",
+                "고MW (>500)",
+                "고지용성 (LogP>5)",
+            ],
+            default="기타(소분자)",
+        )
+        physchem_l2 = np.where(np.isnan(mw), "", physchem_l2)
 
         return {
             "moa": moa,
+            "moa_l2": moa_l2,
             "dev_stage": dev_stage,
             "dev_stage_l2": dev_stage_l2,
+            "modality_l2": modality_l2,
+            "physchem_l2": physchem_l2,
             "safety": safety,
         }
 
