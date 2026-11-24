@@ -434,6 +434,11 @@ class Dataset:
             default="기타(소분자)",
         )
         physchem_l2 = np.where(np.isnan(mw), "", physchem_l2)
+        # Physicochemical L1: the coarse size class every L2 (BCS/bRo5) bucket
+        # rolls up into -- the BCS/고지용성/기타 bands are all MW<=500, the 고MW
+        # ones MW>500 -- so L1 = {소분자, 거대분자} is a clean parent of L2.
+        physchem_l1 = np.where(mw <= 500, "소분자 (MW≤500)", "거대분자 (MW>500)")
+        physchem_l1 = np.where(np.isnan(mw), "", physchem_l1)
 
         return {
             "moa": moa,
@@ -441,6 +446,7 @@ class Dataset:
             "dev_stage": dev_stage,
             "dev_stage_l2": dev_stage_l2,
             "modality_l2": modality_l2,
+            "physchem_l1": physchem_l1,
             "physchem_l2": physchem_l2,
             "safety": safety,
         }

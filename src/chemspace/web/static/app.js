@@ -31,6 +31,12 @@ const state = {
   clickToggles: 0,         // how many individual shift-clicks went into it
   domains: [],
   colorBy: "cluster",
+  /* The colour picker is two-level: a classification key (colorDomain) and the
+   * 상위(l1)/세부(l2) depth. colorBy is *derived* from these via
+   * resolveColorField() and cached, so colourPoints/renderLegend keep reading a
+   * single resolved field name. */
+  colorDomain: "cluster",
+  colorLevel: "l2",
   /* Per-domain coverage of the *current* node, fetched after it loads.
    * The whole point of holding it is to label the domain picker before the
    * click: a switch onto a domain that covers 91 of 1,200 compounds costs the
@@ -49,6 +55,51 @@ const state = {
 };
 
 const $ = (id) => document.getElementById(id);
+
+/* The colour picker's classifications. L1 and L2 are the same field family at
+ * two depths: every L2 value rolls up into exactly one L1, so when colouring by
+ * L2 the legend nests each L2 under its L1 parent with counts that sum. cluster
+ * / 도메인 라벨 and the single-level flags have no L2 -- their 상위/세부 toggle
+ * is hidden. The per-point L1 field is what gives each L2 point its parent, so
+ * the roll-up needs no separate mapping. */
+const COLOR_DOMAINS = [
+  { key: "cluster", label: "군집" },
+  { key: "domain_label", label: "도메인 라벨", l1: "domain_label" },
+  { key: "modality", label: "모달리티", l1: "modality", l2: "modality_l2" },
+  { key: "moa", label: "작용기전", l1: "moa", l2: "moa_l2" },
+  { key: "dev_stage", label: "개발단계", l1: "dev_stage", l2: "dev_stage_l2" },
+  { key: "physchem", label: "물성", l1: "physchem_l1", l2: "physchem_l2" },
+  { key: "safety", label: "안전 플래그", l1: "safety" },
+  { key: "struct_alert", label: "구조알림", l1: "struct_alert" },
+  { key: "novelty", label: "신규성", l1: "novelty" },
+];
+const colorDomainOf = (key) => COLOR_DOMAINS.find((d) => d.key === key);
+
+/* The field colourPoints/renderLegend read, from the (domain, level) pair. */
+function resolveColorField() {
+  const dom = colorDomainOf(state.colorDomain) || COLOR_DOMAINS[0];
+  if (dom.key === "cluster") return "cluster";
+  return dom.l2 && state.colorLevel === "l2" ? dom.l2 : dom.l1;
+}
+
+/* Is the active colouring an L2 showing a roll-up (parent L1 field present)? */
+function activeRollupDomain(pts) {
+  const dom = colorDomainOf(state.colorDomain);
+  if (dom && dom.l2 && state.colorBy === dom.l2 && pts && pts[dom.l1]) return dom;
+  return null;
+}
+
+/* Show the 상위/세부 toggle only for a classification that has both levels,
+ * and mark the active depth. */
+function syncLevelToggle() {
+  const wrap = $("levelToggle");
+  if (!wrap) return;
+  const dom = colorDomainOf(state.colorDomain);
+  wrap.classList.toggle("hidden", !(dom && dom.l2));
+  wrap.querySelectorAll("button").forEach((b) =>
+    b.classList.toggle("active", b.dataset.level === state.colorLevel)
+  );
+}
 
 /* Plotly's click event carries the DOM event, but its selection events do not
  * reliably, so track the modifier ourselves rather than depending on it.
@@ -131,6 +182,7 @@ function toast(msg, isError) {
 function colourPoints(pts) {
   const legend = new Map();
   let colors;
+  let groups = null;
 
   if (state.colorBy === "cluster") {
     colors = pts.cluster.map((c) => {
@@ -161,8 +213,28 @@ function colourPoints(pts) {
     if (state.isolate.size) {
       colors = values.map((v, k) => (state.isolate.has(v) ? colors[k] : dimColor(colors[k])));
     }
+    // Roll-up: when the field is an L2, group its legend rows under the L1 each
+    // point belongs to, with an L1 subtotal that sums its children -- the
+    // containment made visible. Parent comes straight from the per-point L1.
+    const dom = activeRollupDomain(pts);
+    if (dom) {
+      const parents = pts[dom.l1].map((v) => v || "미분류");
+      const childParent = new Map();
+      const parentCount = new Map();
+      values.forEach((c, i) => childParent.set(c, parents[i]));
+      parents.forEach((p) => parentCount.set(p, (parentCount.get(p) || 0) + 1));
+      const kids = new Map();
+      order.forEach(([child, n]) => {
+        const p = childParent.get(child);
+        if (!kids.has(p)) kids.set(p, []);
+        kids.get(p).push({ name: child, color: map.get(child), count: n });
+      });
+      groups = [...parentCount.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .map(([p, pc]) => ({ parent: p, count: pc, children: kids.get(p) || [] }));
+    }
   }
-  return { colors, legend };
+  return { colors, legend, groups };
 }
 
 /* A hex swatch colour faded to a faint rgba, for points the overlay filter
@@ -175,11 +247,52 @@ function dimColor(hex, alpha = 0.12) {
   return `rgba(${r},${g},${b},${alpha})`;
 }
 
-function renderLegend(legend) {
+function renderLegend(legend, groups) {
   // Overlay colourings turn the legend into a filter: each row toggles whether
   // its value stays bright. Cluster colouring keeps its click-to-profile rows.
   const overlay = state.colorBy !== "cluster";
   const iso = state.isolate;
+
+  // Roll-up legend (L2 under its L1 parent): the parent row is a group toggle
+  // (isolates all its children), children are the usual per-value toggles.
+  if (overlay && groups) {
+    const rows = [];
+    if (iso.size) {
+      rows.push(
+        `<div class="legend-row legend-clickable legend-reset" data-reset="1"` +
+        ` title="필터 해제 — 전체 보기">✕ 전체 보기 (필터 ${iso.size})</div>`
+      );
+    }
+    let shown = 0;
+    for (const g of groups) {
+      if (shown >= 30) break;
+      const kids = g.children.map((c) => c.name);
+      const anyOn = iso.size === 0 || kids.some((n) => iso.has(n));
+      rows.push(
+        `<div class="legend-row legend-group legend-clickable${anyOn ? "" : " legend-off"}"` +
+        ` data-group="${escapeHtml(JSON.stringify(kids))}"` +
+        ` title="클릭하면 이 상위 분류 전체를 밝게 — ${escapeHtml(g.parent)}">` +
+        `<span class="legend-name">${escapeHtml(g.parent)}</span>` +
+        `<span class="count">${g.count.toLocaleString()}</span></div>`
+      );
+      for (const c of g.children) {
+        if (shown >= 30) break;
+        shown += 1;
+        const off = iso.size > 0 && !iso.has(c.name);
+        rows.push(
+          `<div class="legend-row legend-child legend-clickable${off ? " legend-off" : ""}"` +
+          ` data-value="${escapeHtml(c.name)}"` +
+          ` title="클릭하면 이 값만 밝게 — ${escapeHtml(c.name)}">` +
+          `<span class="swatch" style="background:${c.color}"></span>` +
+          `<span class="legend-name">${escapeHtml(c.name)}</span>` +
+          `<span class="count">${c.count.toLocaleString()}</span></div>`
+        );
+      }
+    }
+    $("legend").innerHTML = rows.join("");
+    return;
+  }
+
   const rows = [...legend.entries()].slice(0, 30).map(
     ([name, [color, count, label, cid]]) => {
       if (overlay) {
@@ -485,8 +598,8 @@ function currentView() {
 }
 
 function drawPlot(pts) {
-  const { colors, legend } = colourPoints(pts);
-  renderLegend(legend);
+  const { colors, legend, groups } = colourPoints(pts);
+  renderLegend(legend, groups);
 
   const trace = {
     type: "scattergl",
@@ -1038,11 +1151,27 @@ function wire() {
 
   $("domainSelect").onchange = () => renderDomainNote();
 
-  $("colorSelect").onchange = (e) => {
-    state.colorBy = e.target.value;
+  // Two-level colour picker: 분류 기준 <select> + 상위/세부 toggle. Both resolve
+  // to one field (resolveColorField) that the rest of the code reads as colorBy.
+  const colorSel = $("colorSelect");
+  colorSel.innerHTML = COLOR_DOMAINS
+    .map((d) => `<option value="${d.key}">${escapeHtml(d.label)}</option>`)
+    .join("");
+  colorSel.value = state.colorDomain;
+  const applyColorChange = () => {
+    state.colorBy = resolveColorField();
     state.isolate.clear();  // a filter on the old field is meaningless on the new one
+    syncLevelToggle();
     if (state.points) drawPlot(state.points);
   };
+  colorSel.onchange = (e) => {
+    state.colorDomain = e.target.value;
+    applyColorChange();
+  };
+  $("levelToggle").querySelectorAll("button").forEach((b) => {
+    b.onclick = () => { state.colorLevel = b.dataset.level; applyColorChange(); };
+  });
+  syncLevelToggle();
 
   $("saveBtn").onclick = () => guarded(async () => {
     /* Ask for a name. It used to send "web" for everybody, which on a shared
@@ -1081,6 +1210,16 @@ function wire() {
     // Overlay colouring: legend rows are filter toggles (and a reset row).
     if (e.target.closest("[data-reset]")) {
       state.isolate.clear();
+      if (state.points) drawPlot(state.points);
+      return;
+    }
+    // A roll-up parent row toggles its whole set of L2 children at once.
+    const grow = e.target.closest("[data-group]");
+    if (grow) {
+      let kids = [];
+      try { kids = JSON.parse(grow.dataset.group); } catch (_) { kids = []; }
+      const allOn = kids.length && kids.every((n) => state.isolate.has(n));
+      kids.forEach((n) => (allOn ? state.isolate.delete(n) : state.isolate.add(n)));
       if (state.points) drawPlot(state.points);
       return;
     }

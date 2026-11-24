@@ -1211,6 +1211,11 @@ def test_overlay_columns_derive_moa_stage_safety():
     assert list(out["physchem_l2"]) == [
         "BCS1 (고용해·고투과)", "고MW·고지용성", "고MW (>500)", "고MW (>500)", "기타(소분자)",
     ]
+    # Physicochemical L1: the size class each L2 bucket rolls up into (MW<=500).
+    assert list(out["physchem_l1"]) == [
+        "소분자 (MW≤500)", "거대분자 (MW>500)", "거대분자 (MW>500)",
+        "거대분자 (MW>500)", "소분자 (MW≤500)",
+    ]
 
 
 def test_overlay_columns_tolerate_missing_source_columns():
@@ -1227,6 +1232,31 @@ def test_overlay_columns_tolerate_missing_source_columns():
     assert list(out["moa_l2"]) == ["", ""]
     assert list(out["modality_l2"]) == ["", ""]
     assert list(out["physchem_l2"]) == ["", ""]  # no descriptors -> 미분류, not a bucket
+    assert list(out["physchem_l1"]) == ["", ""]
+
+
+def test_physchem_l1_is_a_clean_parent_of_l2():
+    """Every non-blank physchem_l2 bucket rolls up into exactly one L1."""
+    from chemspace.data.dataset import Dataset
+
+    rng = np.random.default_rng(0)
+    n = 300
+    compounds = pd.DataFrame(
+        {
+            "mw": rng.uniform(100, 1200, n),
+            "clogp": rng.uniform(-2, 8, n),
+            "tpsa": rng.uniform(10, 160, n),
+        },
+        index=[f"C{i}" for i in range(n)],
+    )
+    out = Dataset._overlay_columns(compounds, pd.DataFrame(columns=["chembl_id"]))
+    l1 = pd.Series(out["physchem_l1"])
+    l2 = pd.Series(out["physchem_l2"])
+    # Containment: each L2 value appears under one and only one L1 value.
+    pairs = pd.DataFrame({"l1": l1, "l2": l2})
+    pairs = pairs[pairs["l2"] != ""]
+    parents_per_child = pairs.groupby("l2")["l1"].nunique()
+    assert (parents_per_child == 1).all()
 
 
 def test_structural_alert_label_and_priority():
