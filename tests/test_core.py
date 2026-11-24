@@ -1168,6 +1168,118 @@ def test_target_seq_registered_only_when_embeddings_present():
     assert "Protein" in prof["summary"]
 
 
+# ----------------------------------------------------------- target_knowledge
+
+
+def _knowledge_fake_ds():
+    """A tiny dataset carrying knowledge embeddings for three ChEMBL targets."""
+    from chemspace.data.dataset import TargetKnowledge
+
+    ids = [f"C{i:04d}" for i in range(8)]
+    rng = np.random.default_rng(2)
+    mat = rng.normal(size=(3, 5)).astype(np.float32)
+    kn = TargetKnowledge(dim=5, index={"T1": 0, "T2": 1, "T3": 2}, matrix=mat)
+    # C0..C4 hit known targets; C5 hits one with no embedding; C6/C7 none.
+    tids = {"C0000": ("T1",), "C0001": ("T2",), "C0002": ("T1", "T2"),
+            "C0003": ("T3",), "C0004": ("T2", "T3"), "C0005": ("T9",)}
+    terms = {c: ("L1:Enzyme", "TGT:Protein") for c in tids}
+    return SimpleNamespace(target_knowledge=kn, target_ids=tids,
+                           target_terms=terms, compounds=pd.DataFrame(index=ids)), ids
+
+
+def test_target_knowledge_loads_and_means_over_targets(tmp_path):
+    from chemspace.data.dataset import TargetKnowledge
+
+    p = tmp_path / "target_knowledge.npz"
+    assert TargetKnowledge.load(p) is None  # absent -> unavailable
+    np.savez_compressed(
+        p, target_ids=np.array(["T1", "T2"], dtype=object), emb=np.ones((2, 4), dtype=np.float32)
+    )
+    kn = TargetKnowledge.load(p)
+    assert kn.dim == 4
+    assert kn.mean_vector(("T1", "T9")) is not None  # T9 ignored, T1 used
+    assert kn.mean_vector(("T9",)) is None           # none known -> None
+
+
+def test_target_knowledge_domain_builds_knowledge_features():
+    from chemspace.domains.builtin import TargetKnowledgeDomain
+
+    ds, ids = _knowledge_fake_ds()
+    dom = TargetKnowledgeDomain(ds)
+    f = dom.featurize(ids)
+
+    assert dom.name == "target_knowledge"
+    assert f.metric == "euclidean" and f.kind == "continuous"
+    # covered exactly the five whose targets have an embedding (C5's T9 is absent)
+    assert [ids[i] for i in np.flatnonzero(f.covered)] == ["C0000", "C0001", "C0002", "C0003", "C0004"]
+    assert np.allclose(f.X[~f.covered], 0.0)
+    assert np.allclose(f.X[f.covered].mean(axis=0), 0.0, atol=1e-5)
+
+
+def test_target_knowledge_registered_only_with_cache():
+    from chemspace.domains import default_registry
+
+    # No cache on the fake dataset -> the knowledge view is not offered.
+    assert "target_knowledge" not in default_registry(FakeDataset()).names
+    # Guard logic the registry uses when the cache is present.
+    ds, _ = _knowledge_fake_ds()
+    assert ds.target_knowledge is not None
+
+
+# ------------------------------------------------------------- target_activity
+
+
+def test_target_activity_profile_keeps_strongest_and_fills_mechanism():
+    from chemspace.data.dataset import Dataset, DEFAULT_ACTIVITY_PCHEMBL
+
+    targets = pd.DataFrame(
+        {
+            "chembl_id": ["C0", "C0", "C0", "C1"],
+            "target_chembl_id": ["T1", "T1", "T2", "T3"],
+            "pchembl_value": [8.0, 9.0, np.nan, 7.5],  # T1 measured twice; T2 mechanism-only
+        }
+    )
+    prof = Dataset._target_activity(targets)
+    d0 = dict(prof["C0"])
+    assert d0["T1"] == 9.0                        # strongest measurement kept
+    assert d0["T2"] == DEFAULT_ACTIVITY_PCHEMBL   # no measurement -> stand-in potency
+    assert dict(prof["C1"]) == {"T3": 7.5}
+
+
+def test_target_activity_domain_embeds_profile_by_cosine():
+    from chemspace.domains.builtin import TargetActivityDomain
+
+    ids = ["A", "B", "C", "D"]
+    compounds = pd.DataFrame({"target_l1": ["Kinase", "Kinase", "GPCR", ""]}, index=ids)
+    prof = {
+        "A": (("T1", 9.0), ("T2", 8.0)),
+        "B": (("T1", 8.5),),
+        "C": (("T3", 7.0),),
+        # D hits nothing -> uncovered
+    }
+    ds = SimpleNamespace(
+        target_activity=prof, frame=lambda x: compounds.loc[list(x)], compounds=compounds
+    )
+    dom = TargetActivityDomain(ds)
+    f = dom.featurize(ids)
+
+    assert dom.name == "target_activity"
+    assert f.metric == "cosine" and f.kind == "continuous"
+    assert list(f.covered) == [True, True, True, False]
+    j = f.feature_names.index("TGT:T1")
+    assert f.X[0, j] == 9.0 and f.X[1, j] == 8.5   # potency goes into the vector
+    assert f.X[3].sum() == 0.0                      # uncovered row stays zero
+    # coloured by the curated family, blank -> 미분류
+    assert list(dom.color_series(ids)) == ["Kinase", "Kinase", "GPCR", "미분류"]
+
+
+def test_target_activity_is_always_registered():
+    from chemspace.domains import default_registry
+
+    names = list(default_registry(FakeDataset()).names)
+    assert "target_activity" in names  # no cache gate, unlike seq/knowledge
+
+
 # ------------------------------------------------------------- target_family
 
 

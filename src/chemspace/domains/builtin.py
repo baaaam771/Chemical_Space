@@ -25,6 +25,7 @@ from chemspace.data.derive import COVALENT_WARHEADS, PHYSCHEM_FEATURES
 from chemspace.domains.base import (
     Domain,
     DomainFeatures,
+    auto_min_support,
     multi_hot,
     prune_unsupported,
     standardize_within_subset,
@@ -36,7 +37,9 @@ __all__ = [
     "TargetDomain",
     "TargetFamilyDomain",
     "TargetFamilyMapDomain",
+    "TargetActivityDomain",
     "TargetSeqDomain",
+    "TargetKnowledgeDomain",
     "MoietyDomain",
     "ModalityDomain",
 ]
@@ -526,6 +529,115 @@ class TargetSeqDomain(TargetDomain):
             kind="continuous",
             notes=notes,
         )
+
+
+class TargetKnowledgeDomain(TargetDomain):
+    """The target view re-laid-out by LLM *knowledge* of the proteins.
+
+    Same compounds and the same target tokens for every text tab (so a cluster
+    still reads as its enriched ``TGT:``/family terms), but the map is built from
+    a language model's text-embedding of each target's description instead of
+    sequence (ESM) or shared-ligand (Jaccard) similarity. Targets a model treats
+    as biologically related -- same pathway, same disease, same mechanism -- land
+    near each other even when they share no ligand and little sequence. A
+    compound's vector is the mean over the knowledge vectors of its targets.
+
+    This is a *knowledge*-derived layout: it reflects what the model has read,
+    which need not line up with measured bioactivity -- see the README note. Only
+    compounds whose targets are in ``target_knowledge.npz`` are covered; the
+    domain is registered only when that cache exists.
+    """
+
+    name = "target_knowledge"
+    label = "표적(지식)"
+    description = (
+        "표적 설명(이름·계열·질환)의 LLM 텍스트 임베딩으로 배치 — 기능적으로 "
+        "가까운 표적이 모임 (부분집합 z-score). 같은 표적 토큰으로 설명. "
+        "측정 활성이 아닌 '지식' 기반이라 생물활성과 다를 수 있음."
+    )
+
+    def featurize(self, compound_ids: Sequence[str]) -> DomainFeatures:
+        ids = tuple(compound_ids)
+        emb = self.ds.target_knowledge
+        tids = self.ds.target_ids
+        dim = emb.dim if emb else 0
+        X = np.zeros((len(ids), dim), np.float64)
+        covered = np.zeros(len(ids), dtype=bool)
+        if emb is not None:
+            for i, c in enumerate(ids):
+                v = emb.mean_vector(tids.get(c, ()))
+                if v is not None:
+                    X[i] = v
+                    covered[i] = True
+        Z, notes = _standardize_covered(X, covered)
+        return DomainFeatures(
+            X=Z,
+            compound_ids=ids,
+            covered=covered,
+            feature_names=tuple(f"k{i}" for i in range(Z.shape[1])),
+            metric="euclidean",
+            kind="continuous",
+            notes=notes,
+        )
+
+
+class TargetActivityDomain(TargetDomain):
+    """The target view laid out by the *measured bioactivity profile*.
+
+    Each compound is a vector over targets weighted by how strongly it hits each
+    (pchembl), and the map places compounds by the *shape* of that profile
+    (cosine): compounds with the same polypharmacology -- the same targets hit at
+    the same relative potencies -- land together, whatever their structure.
+
+    This is the activity-grounded counterpart to the knowledge/sequence views:
+    it is built from measured data, not from what a model knows or from sequence
+    similarity, so it does not inherit the "knowledge space ≠ bioactivity space"
+    gap. Needs no external model -- the activity + mechanism layers already ship.
+    Only compounds with at least one supported target (in this subset) are placed.
+    """
+
+    name = "target_activity"
+    label = "표적(활성)"
+    description = (
+        "측정 활성 프로파일 — 표적별 pchembl 벡터의 방향(cosine)으로 배치. 같은 표적을 "
+        "비슷한 세기로 치는(폴리파마콜로지가 닮은) 화합물이 모임. 외부 모델 불필요."
+    )
+
+    def featurize(self, compound_ids: Sequence[str]) -> DomainFeatures:
+        ids = tuple(compound_ids)
+        prof = self.ds.target_activity
+        counts = Counter(t for c in ids for (t, _) in prof.get(c, ()))
+        threshold = (
+            auto_min_support(len(ids)) if self.min_support is None else int(self.min_support)
+        )
+        vocab = sorted(t for t, n in counts.items() if n >= threshold)
+        if not vocab and counts:  # threshold too aggressive for this subset
+            vocab = sorted(counts)
+        index = {t: j for j, t in enumerate(vocab)}
+        X = np.zeros((len(ids), len(vocab)), dtype=np.float32)
+        for i, c in enumerate(ids):
+            for t, v in prof.get(c, ()):
+                j = index.get(t)
+                if j is not None:
+                    X[i, j] = v
+        # Covered = rows that survive subset pruning with a non-zero profile, so
+        # cosine never sees a zero-norm vector.
+        covered = (X != 0).any(axis=1)
+        return DomainFeatures(
+            X=X,
+            compound_ids=ids,
+            covered=covered,
+            feature_names=tuple(f"TGT:{t}" for t in vocab),
+            metric="cosine",
+            kind="continuous",
+            notes={"vocab_full": len(counts), "vocab_kept": len(vocab), "min_support": threshold},
+        )
+
+    def color_series(self, compound_ids: Sequence[str]) -> pd.Series | None:
+        df = self.ds.frame(compound_ids)
+        if "target_l1" not in df.columns:
+            return super().color_series(compound_ids)
+        return df["target_l1"].astype(str).replace("", "미분류")
 
 
 # --------------------------------------------------------------------------- #

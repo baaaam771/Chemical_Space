@@ -53,6 +53,15 @@ Twenty-five is wide enough for a real polypharmacology profile and narrow
 enough that a kinase-panel screen does not swamp the feature space.
 """
 
+DEFAULT_ACTIVITY_PCHEMBL = 7.0
+"""Stand-in potency for a curated mechanism hit that carries no measured pchembl.
+
+The 표적(활성) domain weights each target a compound hits by its pchembl. Mechanism
+rows record intent, not a measurement, so they have no value; rather than drop a
+known interaction, it is entered at a moderate-potency level (~100 nM) so the
+target still shapes the profile without claiming an implausible potency.
+"""
+
 #: ATC anatomical main groups. The first letter of an ATC code is a coarse
 #: therapeutic-area label: 2,818 compounds carry one (57% of the approved
 #: subset).  Measured against ChEMBL_37 it adds only 259 compounds that have no
@@ -106,6 +115,42 @@ class TargetESM:
 
 
 @dataclass
+class TargetKnowledge:
+    """Per-target *knowledge* embeddings (``target_knowledge.npz``).
+
+    Keyed by ChEMBL target id (every protein target has one, unlike UniProt
+    accessions). Each vector is a text-embedding of the target's description
+    (name + protein-class path + organism) produced by a language model, so
+    targets that are functionally/biologically related sit near each other even
+    when their sequences or ligands differ. A compound's knowledge vector is the
+    mean over the targets it hits -- parallel to :class:`TargetESM`.
+
+    This is a *knowledge*-derived layout, not a measured one: it reflects what a
+    model has read about each target, which need not match bioactivity space.
+    Built offline by ``scripts/build_target_knowledge.py`` and gitignored.
+    """
+
+    dim: int
+    index: dict[str, int]
+    matrix: np.ndarray  # (n_targets, dim) float32
+
+    def mean_vector(self, target_ids: Sequence[str]) -> np.ndarray | None:
+        rows = [self.index[t] for t in target_ids if t in self.index]
+        if not rows:
+            return None
+        return self.matrix[rows].mean(axis=0)
+
+    @classmethod
+    def load(cls, path: Path) -> "TargetKnowledge | None":
+        if not path.exists():
+            return None
+        npz = np.load(path, allow_pickle=True)
+        ids = [str(t) for t in npz["target_ids"]]
+        mat = np.ascontiguousarray(npz["emb"], dtype=np.float32)
+        return cls(dim=int(mat.shape[1]), index={t: i for i, t in enumerate(ids)}, matrix=mat)
+
+
+@dataclass
 class Dataset:
     """One ChEMBL snapshot, ready to be looked at through any domain."""
 
@@ -133,6 +178,18 @@ class Dataset:
     target_embeddings: "TargetESM | None" = None
     """Precomputed per-accession ESM-2 sequence embeddings, if the snapshot
     ships ``target_esm.npz``. ``None`` means the sequence domain is unavailable."""
+
+    target_ids: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    """Compound -> its targets' ChEMBL ids, the key for the knowledge domain."""
+    target_knowledge: "TargetKnowledge | None" = None
+    """Precomputed per-target knowledge (LLM text) embeddings, if the snapshot
+    ships ``target_knowledge.npz``. ``None`` means the knowledge domain is
+    unavailable."""
+
+    target_activity: dict[str, tuple[tuple[str, float], ...]] = field(default_factory=dict)
+    """Compound -> ((target ChEMBL id, pchembl), ...): the measured bioactivity
+    profile that the 표적(활성) domain embeds. Built from the activity + mechanism
+    layers; needs no external model, so the domain is always available."""
 
     _row_of: dict[str, int] = None  # type: ignore[assignment]
 
@@ -215,6 +272,9 @@ class Dataset:
             manifest=manifest,
             target_accessions=cls._target_accessions(targets),
             target_embeddings=TargetESM.load(snap / "target_esm.npz"),
+            target_ids=cls._target_ids(targets),
+            target_knowledge=TargetKnowledge.load(snap / "target_knowledge.npz"),
+            target_activity=cls._target_activity(targets),
         )
 
     @staticmethod
@@ -536,6 +596,62 @@ class Dataset:
             if isinstance(a, str) and a:
                 acc.setdefault(rec.chembl_id, set()).add(a)
         return {k: tuple(sorted(v)) for k, v in acc.items()}
+
+    @staticmethod
+    def _target_ids(targets: pd.DataFrame) -> dict[str, tuple[str, ...]]:
+        """Compound -> ChEMBL ids of the targets it hits.
+
+        Parallel to :meth:`_target_accessions` but keeps the target's own ChEMBL
+        id, which is the key into the knowledge embeddings (every protein target
+        has one, so coverage is not limited to UniProt-mapped targets).
+        """
+        if "target_chembl_id" not in targets.columns:
+            return {}
+        ids: dict[str, set[str]] = {}
+        for rec in targets.itertuples(index=False):
+            t = getattr(rec, "target_chembl_id", None)
+            if isinstance(t, str) and t:
+                ids.setdefault(rec.chembl_id, set()).add(t)
+        return {k: tuple(sorted(v)) for k, v in ids.items()}
+
+    @staticmethod
+    def _target_activity(
+        targets: pd.DataFrame,
+    ) -> dict[str, tuple[tuple[str, float], ...]]:
+        """Compound -> its measured bioactivity profile as (target id, pchembl).
+
+        The strongest measured pchembl is kept per (compound, target); a target
+        hit only through the curated mechanism layer (no measurement) is entered
+        at ``DEFAULT_ACTIVITY_PCHEMBL`` so the known interaction still shapes the
+        profile. This is the feature the 표적(활성) domain embeds.
+        """
+        if "target_chembl_id" not in targets.columns:
+            return {}
+        has_p = "pchembl_value" in targets.columns
+        best: dict[str, dict[str, float]] = {}
+        for rec in targets.itertuples(index=False):
+            t = getattr(rec, "target_chembl_id", None)
+            if not isinstance(t, str) or not t:
+                continue
+            v = getattr(rec, "pchembl_value", np.nan) if has_p else np.nan
+            try:
+                v = float(v)
+            except (TypeError, ValueError):
+                v = np.nan
+            d = best.setdefault(rec.chembl_id, {})
+            if v == v:  # a real measurement: keep the strongest
+                prev = d.get(t)
+                if prev is None or prev != prev or v > prev:
+                    d[t] = v
+            elif t not in d:  # mechanism-only: presence, unless a value arrives
+                d[t] = np.nan
+        out: dict[str, tuple[tuple[str, float], ...]] = {}
+        for c, d in best.items():
+            out[c] = tuple(
+                (t, (val if val == val else DEFAULT_ACTIVITY_PCHEMBL))
+                for t, val in sorted(d.items())
+            )
+        return out
 
     # ----------------------------------------------------------------- access
 

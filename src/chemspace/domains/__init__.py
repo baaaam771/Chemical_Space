@@ -11,9 +11,11 @@ from chemspace.domains.builtin import (
     ModalityDomain,
     MoietyDomain,
     PhysChemDomain,
+    TargetActivityDomain,
     TargetDomain,
     TargetFamilyDomain,
     TargetFamilyMapDomain,
+    TargetKnowledgeDomain,
     TargetSeqDomain,
 )
 
@@ -26,7 +28,9 @@ __all__ = [
     "TargetDomain",
     "TargetFamilyDomain",
     "TargetFamilyMapDomain",
+    "TargetActivityDomain",
     "TargetSeqDomain",
+    "TargetKnowledgeDomain",
     "MoietyDomain",
     "ModalityDomain",
     "default_registry",
@@ -38,6 +42,7 @@ BUILTIN = (
     TargetDomain,
     TargetFamilyDomain,
     TargetFamilyMapDomain,
+    TargetActivityDomain,
     MoietyDomain,
     ModalityDomain,
 )
@@ -91,11 +96,15 @@ def default_registry(dataset: Dataset) -> DomainRegistry:
 
     The ESM-2 sequence view is registered only when the snapshot ships the
     precomputed embeddings (``target_esm.npz``); otherwise it would be a dead
-    entry in the domain picker.
+    entry in the domain picker. The knowledge view is gated the same way on
+    ``target_knowledge.npz``.
     """
     reg = DomainRegistry()
     for cls in BUILTIN:
         reg.register(cls(dataset))
     if getattr(dataset, "target_embeddings", None) is not None:
         reg.register(TargetSeqDomain(dataset))
+    # The knowledge view, likewise, only when its embedding cache is present.
+    if getattr(dataset, "target_knowledge", None) is not None:
+        reg.register(TargetKnowledgeDomain(dataset))
     return reg
