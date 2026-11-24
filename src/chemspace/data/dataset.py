@@ -183,6 +183,8 @@ class Dataset:
         # Display overlays (labels, not domains): colour/filter any map by them.
         for col, series in cls._overlay_columns(compounds, mechs).items():
             compounds[col] = series
+        # 구조알림: the one overlay computed (not derived) -- read its cache.
+        compounds["struct_alert"] = cls._structural_alerts(snap, compounds.index)
 
         targets = cls._target_table(
             mechs, acts, tgts, pcs, keep=set(compounds.index)
@@ -437,6 +439,23 @@ class Dataset:
             "physchem_l2": physchem_l2,
             "safety": safety,
         }
+
+    @staticmethod
+    def _structural_alerts(snap: Path, idx: pd.Index) -> pd.Series:
+        """Per-compound 구조알림 label from the ``structural_alerts.parquet`` cache.
+
+        A pure function of SMILES, cached per snapshot because the RDKit
+        FilterCatalog pass is minutes over the whole set (see
+        ``scripts/build_structural_alerts.py``). A snapshot built before this
+        cache existed simply gets a blank column, so it still loads -- the
+        overlay is then empty until the script is run.
+        """
+        path = snap / "structural_alerts.parquet"
+        if not path.exists():
+            return pd.Series("", index=idx, dtype=object)
+        df = pd.read_parquet(path, columns=["chembl_id", "struct_alert"])
+        s = df.set_index("chembl_id")["struct_alert"].astype(str)
+        return s.reindex(idx).fillna("")
 
     @staticmethod
     def _disease_terms(

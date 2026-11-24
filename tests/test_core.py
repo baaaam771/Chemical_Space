@@ -1227,3 +1227,35 @@ def test_overlay_columns_tolerate_missing_source_columns():
     assert list(out["moa_l2"]) == ["", ""]
     assert list(out["modality_l2"]) == ["", ""]
     assert list(out["physchem_l2"]) == ["", ""]  # no descriptors -> 미분류, not a bucket
+
+
+def test_structural_alert_label_and_priority():
+    from chemspace.data.alerts import alert_label, label_from
+
+    # p-benzoquinone is a classic PAINS; a clean/invalid/empty SMILES is blank.
+    assert alert_label("O=C1C=CC(=O)C=C1") == "PAINS"
+    assert alert_label("CCO") == ""           # ethanol: no alert
+    assert alert_label("") == ""
+    assert alert_label("not_a_smiles") == ""  # unparseable -> blank, not an error
+
+    # Most-severe wins: PAINS > NIH > Brenk, blank when none match.
+    assert label_from({"PAINS": True, "NIH": True, "BRENK": True}) == "PAINS"
+    assert label_from({"PAINS": False, "NIH": True, "BRENK": True}) == "NIH"
+    assert label_from({"PAINS": False, "NIH": False, "BRENK": True}) == "Brenk"
+    assert label_from({"PAINS": False, "NIH": False, "BRENK": False}) == ""
+
+
+def test_structural_alerts_cache_optional(tmp_path):
+    from chemspace.data.dataset import Dataset
+
+    idx = pd.Index(["C0", "C1", "C2"])
+    # No cache file -> blank column, so a pre-cache snapshot still loads.
+    blank = Dataset._structural_alerts(tmp_path, idx)
+    assert list(blank) == ["", "", ""]
+
+    # With a cache, labels map by chembl_id; ids absent from it stay blank.
+    pd.DataFrame(
+        {"chembl_id": ["C0", "C2"], "struct_alert": ["PAINS", "Brenk"]}
+    ).to_parquet(tmp_path / "structural_alerts.parquet", index=False)
+    got = Dataset._structural_alerts(tmp_path, idx)
+    assert list(got) == ["PAINS", "", "Brenk"]

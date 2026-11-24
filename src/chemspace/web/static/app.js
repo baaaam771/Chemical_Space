@@ -310,6 +310,7 @@ function showHoverCard(ev) {
           pts.moa && pts.moa[i],
           pts.dev_stage && pts.dev_stage[i],
           pts.safety && pts.safety[i],
+          pts.struct_alert && pts.struct_alert[i] && `알림:${pts.struct_alert[i]}`,
         ].filter(Boolean).join(" · ");
         return ov ? `<div class="hc-props">${escapeHtml(ov)}</div>` : "";
       })()) +
