@@ -34,6 +34,8 @@ __all__ = [
     "PhysChemDomain",
     "DiseaseDomain",
     "TargetDomain",
+    "TargetFamilyDomain",
+    "TargetFamilyMapDomain",
     "TargetSeqDomain",
     "MoietyDomain",
     "ModalityDomain",
@@ -298,6 +300,174 @@ class TargetDomain(_DatasetDomain):
 
     def term_counts(self, compound_ids: Sequence[str]) -> dict:
         return Counter(t for c in compound_ids for t in self.ds.target_terms.get(c, ()))
+
+
+class TargetFamilyDomain(TargetDomain):
+    """The target view re-laid-out so the curated protein families *group*.
+
+    The plain 표적 domain weights every token equally, so the individual target
+    (``TGT:``) tokens -- the most numerous -- dominate the Jaccard distance and
+    the map fragments into many small per-target clusters. The curated family is
+    present but visually scattered.
+
+    This domain up-weights the curated family: under a set-based Jaccard metric,
+    repeating a token is how you weight it, so ``FAM:Kinase`` enters the feature
+    set several times and ``SUB:Kinase▸TK`` a couple of times, while each
+    ``TGT:`` stays at weight one. Same-family compounds then share many bits and
+    pull into one region; the individual targets still differ, so the region
+    keeps internal spread instead of collapsing to a single stacked point (the
+    modality lesson). Narrowing into one family re-featurizes that subset, where
+    the family tokens are constant and the subfamily/target tokens separate it.
+
+    This is a *label-guided* layout -- the geometry is deliberately organised by
+    the family we curated, not discovered from structure alone. That is exactly
+    the ask: a map whose big shapes are the pharmacological families, coloured by
+    the same curation (표적 계열) so shape and colour agree. The weights are the
+    one knob between "crisp blobs" and "natural connections".
+    """
+
+    name = "target_family"
+    label = "표적(계열)"
+    description = (
+        "큐레이션 단백질 계열(L1/L2)을 가중한 표적 토큰 — 같은 계열이 한 영역으로 뭉치고 "
+        "개별 표적이 내부를 퍼뜨림 (Jaccard). 색은 표적 계열과 일치."
+    )
+
+    #: Token repeats = weight under Jaccard. Tuned for "blobs, not dots": strong
+    #: enough that families separate, light enough that targets still spread.
+    FAM_WEIGHT = 4
+    SUB_WEIGHT = 2
+
+    def _family_memberships(self, ids: tuple[str, ...]) -> dict[str, tuple[str, ...]]:
+        df = self.ds.frame(ids)
+        l1_map = df["target_l1"].to_dict() if "target_l1" in df.columns else {}
+        l2_map = df["target_l2"].to_dict() if "target_l2" in df.columns else {}
+        terms: dict[str, tuple[str, ...]] = {}
+        for c in ids:
+            toks: list[str] = []
+            l1 = str(l1_map.get(c) or "")
+            l2 = str(l2_map.get(c) or "")
+            if l1:
+                toks += [f"FAM:{l1}#{k}" for k in range(self.FAM_WEIGHT)]
+                if l2:
+                    toks += [f"SUB:{l1}>{l2}#{k}" for k in range(self.SUB_WEIGHT)]
+            # Individual targets give within-family spread (weight 1).
+            toks += [t for t in self.ds.target_terms.get(c, ()) if t.startswith("TGT:")]
+            if toks:
+                terms[c] = tuple(toks)
+        return terms
+
+    def featurize(self, compound_ids: Sequence[str]) -> DomainFeatures:
+        ids = tuple(compound_ids)
+        memberships = self._family_memberships(ids)
+        X, names, notes = multi_hot(ids, memberships, self.min_support)
+        covered = np.array([bool(memberships.get(c)) for c in ids], dtype=bool)
+        return DomainFeatures(
+            X=X,
+            compound_ids=ids,
+            covered=covered,
+            feature_names=names,
+            metric="jaccard",
+            kind="binary",
+            notes={**notes, "fam_weight": self.FAM_WEIGHT, "sub_weight": self.SUB_WEIGHT},
+        )
+
+    def color_series(self, compound_ids: Sequence[str]) -> pd.Series | None:
+        df = self.ds.frame(compound_ids)
+        if "target_l1" not in df.columns:
+            return super().color_series(compound_ids)
+        return df["target_l1"].astype(str).replace("", "미분류")
+
+
+def _label_codes(values: np.ndarray) -> np.ndarray:
+    """Map strings to int codes for supervision; '' -> -1 (unknown)."""
+    uniq = {v: i for i, v in enumerate(sorted({v for v in values if v}))}
+    return np.array([uniq.get(v, -1) for v in values], dtype=np.int64)
+
+
+class TargetFamilyMapDomain(TargetDomain):
+    """Semi-supervised family map: the curated family *guides* the layout.
+
+    Method A (``TargetFamilyDomain``) up-weighted discrete family tokens under
+    Jaccard, which over-fragments -- near-duplicate token sets scatter into many
+    small islands instead of forming family continents. This domain fixes that by
+    separating the two jobs:
+
+    * **Geometry comes from chemical structure** (the compound's own ECFP bits),
+      which is smooth and continuous -- no token-set duplication, no shattering.
+    * **The macro layout comes from the curated family as a supervision label**
+      handed to UMAP (``y``). Same-family compounds are drawn into one region;
+      different families separate. The result is the thing the plain overlay
+      could not give: coherent family continents, each an internal chemical
+      landscape.
+
+    The supervision is *adaptive*, which is what makes drill-down work. When the
+    subset spans several families, it supervises by curated L1 -> eight
+    continents. Narrow into one family and every point shares that L1, so it
+    supervises by L2 instead -> the subfamilies (TK, CMGC, …) separate. Coverage
+    is the compounds with a curated family; the rest (no protein target, or a
+    target outside the eight families) are placed in the uncovered band.
+    """
+
+    name = "target_family_map"
+    label = "표적(계열지도)"
+    description = (
+        "화학구조(ECFP)로 배치하되 큐레이션 계열을 UMAP 지도 신호(준지도)로 줘 "
+        "같은 계열이 한 대륙으로 모임 — 좁히면 하위계열로 자동 전환. 색은 표적 계열과 일치."
+    )
+
+    #: 0 ignores the family, 1 lets it dominate. Mid-high gives separated
+    #: continents that still keep their internal chemical structure.
+    TARGET_WEIGHT = 0.6
+
+    def _family_labels(self, ids: tuple[str, ...]) -> np.ndarray:
+        df = self.ds.frame(ids)
+        l1 = (
+            df["target_l1"].astype(str).to_numpy()
+            if "target_l1" in df.columns
+            else np.full(len(ids), "", dtype=object)
+        )
+        l2 = (
+            df["target_l2"].astype(str).to_numpy()
+            if "target_l2" in df.columns
+            else np.full(len(ids), "", dtype=object)
+        )
+        covered = l1 != ""
+        # One family in view -> separate its subfamilies; many -> separate families.
+        if len({v for v in l1[covered]}) > 1:
+            label_vals = l1
+        else:
+            label_vals = np.where(l2 != "", l2, l1)
+        return np.where(covered, label_vals, "")
+
+    def featurize(self, compound_ids: Sequence[str]) -> DomainFeatures:
+        ids = tuple(compound_ids)
+        rows = self.ds.rows(ids)
+        raw = self.ds.fps[rows].astype(np.float32)
+        names = tuple(f"bit{i}" for i in range(raw.shape[1]))
+        X, names, notes = prune_unsupported(raw, names, self.min_support)
+
+        labels = self._family_labels(ids)
+        covered = labels != ""
+        sup = _label_codes(labels)
+        n_fam = len({v for v in labels if v})
+        return DomainFeatures(
+            X=X,
+            compound_ids=ids,
+            covered=covered,
+            feature_names=names,
+            metric="jaccard",
+            kind="binary",
+            notes={**notes, "supervised_families": n_fam},
+            supervision=sup,
+            supervision_weight=self.TARGET_WEIGHT,
+        )
+
+    def color_series(self, compound_ids: Sequence[str]) -> pd.Series | None:
+        df = self.ds.frame(compound_ids)
+        if "target_l1" not in df.columns:
+            return super().color_series(compound_ids)
+        return df["target_l1"].astype(str).replace("", "미분류")
 
 
 def _standardize_covered(X: np.ndarray, covered: np.ndarray, eps: float = 1e-9):

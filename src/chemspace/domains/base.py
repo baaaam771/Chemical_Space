@@ -67,6 +67,20 @@ class DomainFeatures:
     notes: dict = field(default_factory=dict)
     """Diagnostics worth showing the user, e.g. how many features were pruned."""
 
+    supervision: np.ndarray | None = None
+    """(n,) int label codes for semi-supervised embedding, or ``None``.
+
+    When present, the embedding may pull same-code points together and push
+    different-code apart -- a *label-guided* layout. ``-1`` marks a point whose
+    label is unknown (UMAP leaves it to the feature structure). The geometry
+    within a label still comes from ``X``; the label only organises the macro
+    layout. Domains that want a purely data-driven map leave this ``None``.
+    """
+
+    supervision_weight: float = 0.5
+    """How strongly ``supervision`` pulls, in ``[0, 1]`` (UMAP ``target_weight``):
+    0 ignores the labels, 1 lets them dominate. Ignored when supervision is None."""
+
     def __post_init__(self) -> None:
         n, d = self.X.shape
         if n != len(self.compound_ids):
@@ -75,6 +89,10 @@ class DomainFeatures:
             raise ValueError(f"X has {n} rows but covered has {self.covered.shape[0]}")
         if d != len(self.feature_names):
             raise ValueError(f"X has {d} cols but {len(self.feature_names)} feature names")
+        if self.supervision is not None and self.supervision.shape[0] != n:
+            raise ValueError(
+                f"X has {n} rows but supervision has {self.supervision.shape[0]}"
+            )
 
     @property
     def n_covered(self) -> int:

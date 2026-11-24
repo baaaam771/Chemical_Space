@@ -12,6 +12,8 @@ from chemspace.domains.builtin import (
     MoietyDomain,
     PhysChemDomain,
     TargetDomain,
+    TargetFamilyDomain,
+    TargetFamilyMapDomain,
     TargetSeqDomain,
 )
 
@@ -22,13 +24,23 @@ __all__ = [
     "PhysChemDomain",
     "DiseaseDomain",
     "TargetDomain",
+    "TargetFamilyDomain",
+    "TargetFamilyMapDomain",
     "TargetSeqDomain",
     "MoietyDomain",
     "ModalityDomain",
     "default_registry",
 ]
 
-BUILTIN = (PhysChemDomain, DiseaseDomain, TargetDomain, MoietyDomain, ModalityDomain)
+BUILTIN = (
+    PhysChemDomain,
+    DiseaseDomain,
+    TargetDomain,
+    TargetFamilyDomain,
+    TargetFamilyMapDomain,
+    MoietyDomain,
+    ModalityDomain,
+)
 
 
 class DomainRegistry:

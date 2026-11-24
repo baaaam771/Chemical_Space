@@ -194,6 +194,13 @@ class Dataset:
         targets = cls._target_table(
             mechs, acts, tgts, pcs, keep=set(compounds.index)
         )
+        # Curated protein-class overlay (표적 계열): a pharmacology-first two-level
+        # label folded from ChEMBL's variable-depth class path. Needs the joined
+        # targets table, so it runs after it -- derived at load, no cache.
+        from chemspace.data.target_class import curate_frame
+
+        for col, series in curate_frame(targets, compounds.index).items():
+            compounds[col] = series
         inds = inds[inds["chembl_id"].isin(compounds.index)]
 
         return cls(

@@ -137,7 +137,7 @@ def node_points(session, node: Node) -> dict:
         "clogp": [round(float(v), 2) for v in df["clogp"]],
     }
     # Label overlays the UI can colour/filter any map by (MoA, stage, safety).
-    for col in ("moa", "moa_l2", "dev_stage", "dev_stage_l2", "modality_l2", "physchem_l1", "physchem_l2", "safety", "struct_alert", "novelty"):
+    for col in ("moa", "moa_l2", "dev_stage", "dev_stage_l2", "modality_l2", "physchem_l1", "physchem_l2", "target_l1", "target_l2", "safety", "struct_alert", "novelty"):
         if col in df.columns:
             out[col] = [str(v) for v in df[col]]
     if "domain_label" in df.columns:

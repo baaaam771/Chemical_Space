@@ -186,7 +186,10 @@ def place(
         )
 
     Xf = features.X[fit]
-    emb, method, enote = _embed(Xf, features.metric, embed)
+    yf = features.supervision[fit] if features.supervision is not None else None
+    emb, method, enote = _embed(
+        Xf, features.metric, embed, y=yf, target_weight=features.supervision_weight
+    )
     notes.update(enote)
     emb, sanitized = _finite(emb)
     if sanitized:
@@ -217,8 +220,16 @@ def place(
 
 
 def _embed(
-    X: np.ndarray, metric: str, cfg: EmbedConfig
+    X: np.ndarray,
+    metric: str,
+    cfg: EmbedConfig,
+    y: np.ndarray | None = None,
+    target_weight: float = 0.5,
 ) -> tuple[np.ndarray, str, dict]:
+    """Embed ``X`` to 2-D. When ``y`` is given (int label codes, ``-1`` unknown),
+    UMAP runs semi-supervised: same-label points are drawn together while the
+    within-label geometry still comes from ``X``. PCA has no supervised form, so
+    the fallback path ignores ``y``."""
     n = X.shape[0]
     if cfg.method == "pca" or n < 10:
         return _pca(X), "pca", {"embed_fallback": "n too small for umap"} if n < 10 else {}
@@ -240,9 +251,13 @@ def _embed(
                 # of. Even so, the Jaccard path is not bit-reproducible across
                 # processes -- see the reproducibility note in the README.
                 n_jobs=1 if cfg.random_state is not None else -1,
+                target_weight=target_weight,
             )
-            emb = reducer.fit_transform(np.ascontiguousarray(X, dtype=np.float32))
-        return np.asarray(emb, dtype=np.float32), f"umap({metric},k={n_neighbors})", {}
+            emb = reducer.fit_transform(
+                np.ascontiguousarray(X, dtype=np.float32), y=y
+            )
+        tag = f"umap({metric},k={n_neighbors}{',y' if y is not None else ''})"
+        return np.asarray(emb, dtype=np.float32), tag, {}
     except Exception as exc:  # noqa: BLE001 - UMAP can fail on degenerate input
         log.warning("UMAP failed (%s); falling back to PCA", exc)
         return _pca(X), "pca", {"embed_fallback": f"umap failed: {exc}"}

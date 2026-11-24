@@ -1168,6 +1168,172 @@ def test_target_seq_registered_only_when_embeddings_present():
     assert "Protein" in prof["summary"]
 
 
+# ------------------------------------------------------------- target_family
+
+
+def test_target_family_domain_groups_same_family_and_weights_tokens():
+    from chemspace.domains.builtin import TargetFamilyDomain
+
+    ids = ["K1", "K2", "G1", "G2"]
+    compounds = pd.DataFrame(
+        {
+            "target_l1": ["Kinase", "Kinase", "GPCR", "GPCR"],
+            "target_l2": [
+                "Tyrosine kinase (TK)",
+                "CMGC (CDK·MAPK·GSK3)",
+                "Family A GPCR",
+                "Family A GPCR",
+            ],
+        },
+        index=ids,
+    )
+    target_terms = {
+        "K1": ("L1:Enzyme", "L2:Kinase", "TGT:EGFR"),
+        "K2": ("L1:Enzyme", "L2:Kinase", "TGT:CDK2"),
+        "G1": ("L1:Membrane receptor", "TGT:DRD2"),
+        "G2": ("L1:Membrane receptor", "TGT:ADRB2"),
+    }
+    ds = SimpleNamespace(
+        frame=lambda x: compounds.loc[list(x)],
+        target_terms=target_terms,
+        compounds=compounds,
+    )
+    dom = TargetFamilyDomain(ds)
+    feat = dom.featurize(ids)
+
+    # The family concept enters as FAM_WEIGHT repeated columns -- that is how a
+    # set-based Jaccard metric is weighted.
+    fam_cols = sum(n.startswith("FAM:Kinase#") for n in feat.feature_names)
+    assert fam_cols == dom.FAM_WEIGHT
+    assert any(n.startswith("TGT:") for n in feat.feature_names)  # internal spread kept
+
+    def jaccard(a, b):
+        a, b = a > 0, b > 0
+        union = (a | b).sum()
+        return 1.0 - (a & b).sum() / union if union else 0.0
+
+    X = feat.X
+    same_family = jaccard(X[0], X[1])   # K1 vs K2
+    cross_family = jaccard(X[0], X[2])  # K1 vs G1
+    # Up-weighting pulls the same family together and pushes families apart...
+    assert same_family < cross_family
+    # ...but same-family compounds do not collapse to one point (targets differ).
+    assert same_family > 0.0
+
+
+def test_target_family_colour_is_the_curated_family():
+    from chemspace.domains.builtin import TargetFamilyDomain
+
+    ids = ["A", "B"]
+    compounds = pd.DataFrame({"target_l1": ["Kinase", ""]}, index=ids)
+    ds = SimpleNamespace(
+        frame=lambda x: compounds.loc[list(x)],
+        target_terms={},
+        compounds=compounds,
+    )
+    dom = TargetFamilyDomain(ds)
+    colours = list(dom.color_series(ids))
+    assert colours == ["Kinase", "미분류"]  # blank family shows as 미분류
+
+
+def test_target_family_is_registered_between_target_and_moiety():
+    from chemspace.domains import default_registry
+
+    reg = default_registry(FakeDataset())
+    assert "target_family" in reg.names
+    names = list(reg.names)
+    assert names.index("target") < names.index("target_family") < names.index("moiety")
+
+
+def _family_map_ds(compounds):
+    """A stub carrying ECFP bits + a frame for TargetFamilyMapDomain."""
+    ids = list(compounds.index)
+    row_of = {c: i for i, c in enumerate(ids)}
+    # Distinct fingerprints so nothing is a pure duplicate.
+    fps = np.eye(len(ids), dtype=np.float32)
+    return SimpleNamespace(
+        fps=fps,
+        rows=lambda xs: np.array([row_of[c] for c in xs], dtype=int),
+        frame=lambda xs: compounds.loc[list(xs)],
+        compounds=compounds,
+        target_terms={},
+    )
+
+
+def test_target_family_map_supervises_by_family_then_subfamily():
+    from chemspace.domains.builtin import TargetFamilyMapDomain
+
+    # Several families in view -> supervise by L1 (continents).
+    multi = pd.DataFrame(
+        {
+            "target_l1": ["Kinase", "Kinase", "GPCR", ""],
+            "target_l2": ["Tyrosine kinase (TK)", "CMGC (CDK·MAPK·GSK3)", "Family A GPCR", ""],
+        },
+        index=["K1", "K2", "G1", "U1"],
+    )
+    dom = TargetFamilyMapDomain(_family_map_ds(multi))
+    feat = dom.featurize(list(multi.index))
+    assert feat.supervision is not None
+    assert list(feat.covered) == [True, True, True, False]
+    sup = feat.supervision
+    assert sup[3] == -1                 # 미분류 is unknown
+    assert sup[0] == sup[1]             # both Kinase -> same continent
+    assert sup[0] != sup[2]             # Kinase vs GPCR -> different
+    assert 0.0 < feat.supervision_weight <= 1.0
+
+    # One family in view -> supervise by L2 (subfamilies split for drill-down).
+    single = pd.DataFrame(
+        {
+            "target_l1": ["Kinase", "Kinase", "Kinase"],
+            "target_l2": ["Tyrosine kinase (TK)", "CMGC (CDK·MAPK·GSK3)", "Tyrosine kinase (TK)"],
+        },
+        index=["K1", "K2", "K3"],
+    )
+    dom2 = TargetFamilyMapDomain(_family_map_ds(single))
+    sup2 = dom2.featurize(list(single.index)).supervision
+    assert sup2[0] == sup2[2]           # both TK
+    assert sup2[0] != sup2[1]           # TK vs CMGC separate
+
+
+def test_place_threads_supervision_without_crashing():
+    from chemspace.placement import place
+
+    n = 6  # < 10 -> PCA path, which must tolerate (ignore) the supervision label
+    X = np.random.default_rng(0).normal(size=(n, 4)).astype(np.float32)
+    feat = DomainFeatures(
+        X=X,
+        compound_ids=tuple(f"C{i}" for i in range(n)),
+        covered=np.ones(n, dtype=bool),
+        feature_names=("a", "b", "c", "d"),
+        metric="euclidean",
+        kind="continuous",
+        supervision=np.array([0, 0, 1, 1, -1, -1], dtype=np.int64),
+        supervision_weight=0.6,
+    )
+    p = place(feat)
+    assert p.coords.shape == (n, 2)
+
+
+def test_domain_features_rejects_mismatched_supervision():
+    with pytest.raises(ValueError):
+        DomainFeatures(
+            X=np.zeros((3, 2), dtype=np.float32),
+            compound_ids=("A", "B", "C"),
+            covered=np.ones(3, dtype=bool),
+            feature_names=("x", "y"),
+            metric="euclidean",
+            kind="continuous",
+            supervision=np.array([0, 1], dtype=np.int64),  # wrong length
+        )
+
+
+def test_target_family_map_is_registered():
+    from chemspace.domains import default_registry
+
+    names = list(default_registry(FakeDataset()).names)
+    assert names.index("target_family") < names.index("target_family_map") < names.index("moiety")
+
+
 def test_overlay_columns_derive_moa_stage_safety():
     from chemspace.data.dataset import Dataset
 
@@ -1257,6 +1423,68 @@ def test_physchem_l1_is_a_clean_parent_of_l2():
     pairs = pairs[pairs["l2"] != ""]
     parents_per_child = pairs.groupby("l2")["l1"].nunique()
     assert (parents_per_child == 1).all()
+
+
+def test_target_curate_reaches_the_right_depth_per_branch():
+    from chemspace.data.target_class import curate
+
+    # Kinase/Protease are L2 under Enzyme; the kinase subfamily is at L4.
+    assert curate("Enzyme", "Kinase", "Protein Kinase", "TK protein kinase group") == (
+        "Kinase",
+        "Tyrosine kinase (TK)",
+    )
+    assert curate("Enzyme", "Protease", "Serine protease", None) == (
+        "Protease",
+        "Serine protease",
+    )
+    # Other enzymes roll up as Enzyme (기타) keyed by their L2.
+    assert curate("Enzyme", "Hydrolase", None, None) == ("Enzyme (기타)", "Hydrolase")
+    # GPCR is a branch of Membrane receptor; non-GPCR membrane receptors drop out.
+    assert curate("Membrane receptor", "Family A G protein-coupled receptor", None, None) == (
+        "GPCR",
+        "Family A GPCR",
+    )
+    assert curate("Membrane receptor", "Toll-like and Il-1 receptors", None, None) == ("", "")
+    # Nuclear receptor is a branch of Transcription factor; L1 families pass through.
+    assert curate("Transcription factor", "Nuclear receptor", None, None)[0] == "Nuclear Receptor"
+    assert curate("Ion channel", "Voltage-gated ion channel", None, None)[0] == "Ion Channel"
+    assert curate("Epigenetic regulator", "Reader", None, None) == ("Epigenetic", "Reader")
+    # The ChEMBL tail (Other/Unclassified/unannotated) is 미분류.
+    assert curate("Unclassified protein", None, None, None) == ("", "")
+    assert curate(None, None, None, None) == ("", "")
+
+
+def test_target_curate_frame_picks_dominant_family_and_blanks_the_rest():
+    from chemspace.data.target_class import curate_frame
+
+    targets = pd.DataFrame(
+        {
+            "chembl_id": ["C0", "C0", "C0", "C1", "C2"],
+            # C0 hits two kinases (TK, CMGC) and one GPCR -> Kinase wins, TK/CMGC tie
+            # breaks alphabetically to the CMGC label.
+            "l1": ["Enzyme", "Enzyme", "Membrane receptor", "Ion channel", "Unclassified protein"],
+            "l2": [
+                "Kinase",
+                "Kinase",
+                "Family A G protein-coupled receptor",
+                "Voltage-gated ion channel",
+                None,
+            ],
+            "l3": ["Protein Kinase", "Protein Kinase", None, None, None],
+            "l4": ["TK protein kinase group", "CMGC protein kinase group", None, None, None],
+        }
+    )
+    idx = pd.Index(["C0", "C1", "C2", "C3"])  # C3 has no target row at all
+    out = curate_frame(targets, idx)
+
+    assert out["target_l1"].loc["C0"] == "Kinase"
+    assert out["target_l1"].loc["C1"] == "Ion Channel"
+    assert out["target_l2"].loc["C1"] == "Voltage-gated ion channel"
+    # C2's only class is unclassified; C3 has no targets -> both 미분류 (blank).
+    assert out["target_l1"].loc["C2"] == ""
+    assert out["target_l1"].loc["C3"] == ""
+    # L1 is a clean parent of L2 within a compound.
+    assert out["target_l2"].loc["C0"] in {"Tyrosine kinase (TK)", "CMGC (CDK·MAPK·GSK3)"}
 
 
 def test_structural_alert_label_and_priority():

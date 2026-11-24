@@ -69,6 +69,7 @@ const COLOR_DOMAINS = [
   { key: "moa", label: "작용기전", l1: "moa", l2: "moa_l2" },
   { key: "dev_stage", label: "개발단계", l1: "dev_stage", l2: "dev_stage_l2" },
   { key: "physchem", label: "물성", l1: "physchem_l1", l2: "physchem_l2" },
+  { key: "target", label: "표적 계열", l1: "target_l1", l2: "target_l2" },
   { key: "safety", label: "안전 플래그", l1: "safety" },
   { key: "struct_alert", label: "구조알림", l1: "struct_alert" },
   { key: "novelty", label: "신규성", l1: "novelty" },
@@ -179,10 +180,14 @@ function toast(msg, isError) {
 
 /* ---------------------------------------------------------------- colour */
 
+/* Base marker size for a map of this many points (smaller when crowded). */
+const markerBase = (pts) => (pts.x.length > 6000 ? 4 : 6);
+
 function colourPoints(pts) {
   const legend = new Map();
   let colors;
   let groups = null;
+  let sizes = null;
 
   if (state.colorBy === "cluster") {
     colors = pts.cluster.map((c) => {
@@ -211,7 +216,13 @@ function colourPoints(pts) {
     // Visual filter: when some values are isolated, the rest fade to a faint
     // backdrop so the kept set stands out -- in place, no re-placement.
     if (state.isolate.size) {
+      const base = markerBase(pts);
       colors = values.map((v, k) => (state.isolate.has(v) ? colors[k] : dimColor(colors[k])));
+      // Shrink the faded points as well as fading them: at low opacity a dense
+      // region of same-size dots still piles into an opaque blob that buries the
+      // kept set. Smaller backdrop dots + a slightly larger kept set keep the
+      // isolated points legible even where compounds crowd together.
+      sizes = values.map((v) => (state.isolate.has(v) ? base + 1 : Math.max(2, base - 3)));
     }
     // Roll-up: when the field is an L2, group its legend rows under the L1 each
     // point belongs to, with an L1 subtotal that sums its children -- the
@@ -234,17 +245,21 @@ function colourPoints(pts) {
         .map(([p, pc]) => ({ parent: p, count: pc, children: kids.get(p) || [] }));
     }
   }
-  return { colors, legend, groups };
+  return { colors, legend, groups, sizes };
 }
 
-/* A hex swatch colour faded to a faint rgba, for points the overlay filter
- * hides. Multiplies with the trace's own 0.8 opacity, so ~0.1 reads as a
- * barely-there backdrop. Non-hex input (shouldn't occur here) passes through. */
-function dimColor(hex, alpha = 0.12) {
+/* A swatch colour turned into a near-neutral backdrop for points the overlay
+ * filter hides. Blended most of the way to mid-grey (keeping only a hint of the
+ * original hue) and faded: a grey fog is far easier to read a bright, enlarged
+ * selection against than a same-hue haze, where the kept colour and the dimmed
+ * colour are the same and only the opacity differs. Multiplies with the trace's
+ * 0.8 opacity. Non-hex input (shouldn't occur here) falls back to plain grey. */
+function dimColor(hex, alpha = 0.16) {
   const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex);
-  if (!m) return hex;
+  if (!m) return `rgba(150,150,150,${alpha})`;
   const [r, g, b] = [1, 2, 3].map((i) => parseInt(m[i], 16));
-  return `rgba(${r},${g},${b},${alpha})`;
+  const mix = (c) => Math.round(c * 0.35 + 150 * 0.65);
+  return `rgba(${mix(r)},${mix(g)},${mix(b)},${alpha})`;
 }
 
 function renderLegend(legend, groups) {
@@ -422,6 +437,11 @@ function showHoverCard(ev) {
         const ov = [
           pts.moa && pts.moa[i],
           pts.dev_stage && pts.dev_stage[i],
+          pts.target_l1 &&
+            pts.target_l1[i] &&
+            `표적:${pts.target_l1[i]}${
+              pts.target_l2 && pts.target_l2[i] ? " ▸ " + pts.target_l2[i] : ""
+            }`,
           pts.safety && pts.safety[i],
           pts.struct_alert && pts.struct_alert[i] && `알림:${pts.struct_alert[i]}`,
           pts.novelty && pts.novelty[i] && `신규성:${pts.novelty[i]}`,
@@ -598,16 +618,17 @@ function currentView() {
 }
 
 function drawPlot(pts) {
-  const { colors, legend, groups } = colourPoints(pts);
+  const { colors, legend, groups, sizes } = colourPoints(pts);
   renderLegend(legend, groups);
 
+  const base = markerBase(pts);
   const trace = {
     type: "scattergl",
     mode: "markers",
     x: pts.x,
     y: pts.y,
     marker: {
-      size: pts.x.length > 6000 ? 4 : 6,
+      size: sizes || base,
       color: colors,
       opacity: 0.8,
       line: { width: 0 },
@@ -617,9 +638,12 @@ function drawPlot(pts) {
     // cannot do.
     hoverinfo: "none",
     // Stated rather than left to plotly's defaults, because a shift-click
-    // selection has to look the same as a lassoed one.
-    selected: { marker: { opacity: 1 } },
-    unselected: { marker: { opacity: 0.15 } },
+    // selection has to look the same as a lassoed one. The selected set is
+    // enlarged and the rest shrunk as well as faded: at a uniform size a dense
+    // patch of dimmed points still buries the selection, so the size gap is what
+    // keeps the chosen compounds legible where points crowd together.
+    selected: { marker: { opacity: 1, size: base + 2 } },
+    unselected: { marker: { opacity: 0.3, size: Math.max(2, base - 2) } },
     selectedpoints: state.selection.size ? [...state.selection] : null,
   };
 
