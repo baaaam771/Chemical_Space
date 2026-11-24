@@ -1189,6 +1189,9 @@ def test_overlay_columns_derive_moa_stage_safety():
     out = Dataset._overlay_columns(compounds, mechs)
 
     assert list(out["dev_stage"]) == ["승인", "임상", "전임상/미상", "전임상/미상", "임상"]
+    assert list(out["dev_stage_l2"]) == [
+        "Phase 4 (시판)", "Phase 2", "전임상/미상", "전임상/미상", "Early Phase 1"
+    ]
     assert list(out["safety"]) == ["블랙박스경고", "", "", "시판중단", ""]
     assert list(out["moa"]) == ["Inhibitor", "Antagonist", "", "", ""]
 
@@ -1201,5 +1204,6 @@ def test_overlay_columns_tolerate_missing_source_columns():
     out = Dataset._overlay_columns(compounds, mechs)
 
     assert list(out["dev_stage"]) == ["전임상/미상", "전임상/미상"]
+    assert list(out["dev_stage_l2"]) == ["전임상/미상", "전임상/미상"]
     assert list(out["safety"]) == ["", ""]
     assert list(out["moa"]) == ["", ""]

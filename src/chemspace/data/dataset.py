@@ -326,10 +326,17 @@ class Dataset:
                 return pd.Series(np.nan, index=idx)
             return pd.to_numeric(compounds[col], errors="coerce")
 
-        # Development stage from ChEMBL max_phase: 4 approved, >0 clinical, else pre.
+        # Development stage from ChEMBL max_phase. Two levels: a coarse L1
+        # (approved/clinical/pre) and the finer L2 phase, so a map can be
+        # coloured at either granularity.
         phase = num("max_phase")
         dev_stage = np.select(
             [phase >= 4, phase > 0], ["승인", "임상"], default="전임상/미상"
+        )
+        dev_stage_l2 = np.select(
+            [phase >= 4, phase == 3, phase == 2, phase == 1, phase > 0],
+            ["Phase 4 (시판)", "Phase 3", "Phase 2", "Phase 1", "Early Phase 1"],
+            default="전임상/미상",
         )
 
         # Safety flags; a withdrawal is the stronger statement, so it wins.
@@ -350,7 +357,12 @@ class Dataset:
         else:
             moa = np.full(len(idx), "", dtype=object)
 
-        return {"moa": moa, "dev_stage": dev_stage, "safety": safety}
+        return {
+            "moa": moa,
+            "dev_stage": dev_stage,
+            "dev_stage_l2": dev_stage_l2,
+            "safety": safety,
+        }
 
     @staticmethod
     def _disease_terms(
