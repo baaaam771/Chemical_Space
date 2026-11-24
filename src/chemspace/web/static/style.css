@@ -323,6 +323,9 @@ tr.special td { color: var(--muted); font-style: italic; }
 .legend-clickable, .row-cluster { cursor: pointer; }
 .legend-clickable:hover { background: var(--panel); border-radius: 4px; }
 .row-cluster:hover { background: var(--panel); }
+/* An overlay value filtered out: the row fades but stays readable and clickable. */
+.legend-off { opacity: 0.4; }
+.legend-reset { font-weight: 600; color: var(--muted); }
 .rep-grid {
   display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
   gap: 8px;

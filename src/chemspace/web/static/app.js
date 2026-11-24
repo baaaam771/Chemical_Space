@@ -41,6 +41,11 @@ const state = {
    * by cluster id. Populated after the cluster profile loads, so the legend can
    * say "군집 3 · Breast Neoplasms …" instead of a bare "군집 3". */
   clusterLabels: null,
+  /* Visual filter for overlay colourings (MoA/stage/safety/…): the set of
+   * values kept bright. Empty means "show all". Pure client state -- it dims
+   * points in place, never re-places, so the map and zoom are untouched. Reset
+   * whenever the node or the colour field changes. */
+  isolate: new Set(),
 };
 
 const $ = (id) => document.getElementById(id);
@@ -151,13 +156,43 @@ function colourPoints(pts) {
     const map = new Map(order.map(([k], i) => [k, PALETTE[i % PALETTE.length]]));
     colors = values.map((v) => map.get(v));
     order.forEach(([k, n]) => legend.set(k, [map.get(k), n]));
+    // Visual filter: when some values are isolated, the rest fade to a faint
+    // backdrop so the kept set stands out -- in place, no re-placement.
+    if (state.isolate.size) {
+      colors = values.map((v, k) => (state.isolate.has(v) ? colors[k] : dimColor(colors[k])));
+    }
   }
   return { colors, legend };
 }
 
+/* A hex swatch colour faded to a faint rgba, for points the overlay filter
+ * hides. Multiplies with the trace's own 0.8 opacity, so ~0.1 reads as a
+ * barely-there backdrop. Non-hex input (shouldn't occur here) passes through. */
+function dimColor(hex, alpha = 0.12) {
+  const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex);
+  if (!m) return hex;
+  const [r, g, b] = [1, 2, 3].map((i) => parseInt(m[i], 16));
+  return `rgba(${r},${g},${b},${alpha})`;
+}
+
 function renderLegend(legend) {
+  // Overlay colourings turn the legend into a filter: each row toggles whether
+  // its value stays bright. Cluster colouring keeps its click-to-profile rows.
+  const overlay = state.colorBy !== "cluster";
+  const iso = state.isolate;
   const rows = [...legend.entries()].slice(0, 30).map(
     ([name, [color, count, label, cid]]) => {
+      if (overlay) {
+        const off = iso.size > 0 && !iso.has(name);
+        return (
+          `<div class="legend-row legend-clickable${off ? " legend-off" : ""}"` +
+          ` data-value="${escapeHtml(name)}"` +
+          ` title="클릭하면 이 값만 밝게 — ${escapeHtml(name)}">` +
+          `<span class="swatch" style="background:${color}"></span>` +
+          `<span class="legend-name">${escapeHtml(name)}</span>` +
+          `<span class="count">${count.toLocaleString()}</span></div>`
+        );
+      }
       const tag = label
         ? `<span class="legend-label" title="${escapeHtml(label)}">${escapeHtml(label)}</span>`
         : "";
@@ -174,6 +209,12 @@ function renderLegend(legend) {
     }
   );
   if (legend.size > 30) rows.push(`<div class="muted small">… 외 ${legend.size - 30}개</div>`);
+  if (overlay && iso.size) {
+    rows.unshift(
+      `<div class="legend-row legend-clickable legend-reset" data-reset="1"` +
+      ` title="필터 해제 — 전체 보기">✕ 전체 보기 (필터 ${iso.size})</div>`
+    );
+  }
   $("legend").innerHTML = rows.join("");
 }
 
@@ -775,6 +816,7 @@ async function loadNode(nodeId) {
   state.node = node;
   state.points = points;
   state.clusterLabels = null;  // stale from the previous node until clusters reload
+  state.isolate.clear();       // the previous node's overlay filter does not carry over
 
   $("breadcrumb").textContent = node.breadcrumb;
   $("domainSelect").value = node.domain;
@@ -996,6 +1038,7 @@ function wire() {
 
   $("colorSelect").onchange = (e) => {
     state.colorBy = e.target.value;
+    state.isolate.clear();  // a filter on the old field is meaningless on the new one
     if (state.points) drawPlot(state.points);
   };
 
@@ -1033,6 +1076,20 @@ function wire() {
     if (tr) openClusterCard(tr.dataset.cluster);
   });
   $("legend").addEventListener("click", (e) => {
+    // Overlay colouring: legend rows are filter toggles (and a reset row).
+    if (e.target.closest("[data-reset]")) {
+      state.isolate.clear();
+      if (state.points) drawPlot(state.points);
+      return;
+    }
+    const vrow = e.target.closest("[data-value]");
+    if (vrow) {
+      const v = vrow.dataset.value;
+      if (state.isolate.has(v)) state.isolate.delete(v);
+      else state.isolate.add(v);
+      if (state.points) drawPlot(state.points);
+      return;
+    }
     const row = e.target.closest("[data-cluster]");
     if (row) openClusterCard(row.dataset.cluster);
   });
