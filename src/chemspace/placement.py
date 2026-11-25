@@ -419,6 +419,34 @@ def _cluster(
         ).fit_predict(data)
         return lab.astype(np.int32), f"agglomerative(k={k})"
 
+    if cfg.method == "gmm":
+        from sklearn.mixture import GaussianMixture
+
+        # Soft, elliptical clusters hardened to a label. Fast at scale on 2-D.
+        k = int(min(cfg.n_clusters, max(2, n)))
+        data = np.ascontiguousarray(emb if cfg.on == "coords" else X, dtype=np.float64)
+        lab = GaussianMixture(
+            n_components=k, covariance_type="full", random_state=0
+        ).fit_predict(data)
+        return lab.astype(np.int32), f"gmm(k={k})"
+
+    if cfg.method == "spectral":
+        from sklearn.cluster import SpectralClustering
+
+        # Graph-based. The default RBF affinity is a dense O(n^2) matrix that is
+        # infeasible at scale, so use a kNN affinity graph; even so the Laplacian
+        # eigendecomposition is the heaviest option here.
+        k = int(min(cfg.n_clusters, max(2, n)))
+        data = np.ascontiguousarray(emb if cfg.on == "coords" else X, dtype=np.float64)
+        lab = SpectralClustering(
+            n_clusters=k,
+            affinity="nearest_neighbors",
+            n_neighbors=min(10, n - 1),
+            assign_labels="kmeans",
+            random_state=0,
+        ).fit_predict(data)
+        return lab.astype(np.int32), f"spectral(k={k})"
+
     from sklearn.cluster import HDBSCAN
 
     # copy=False is safe and deliberate: fit_predict gets a freshly built

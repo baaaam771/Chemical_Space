@@ -81,7 +81,7 @@ class SwitchRequest(BaseModel):
 
 class ReclusterRequest(BaseModel):
     node_id: str
-    method: str = Field(pattern=r"^(hdbscan|agglomerative|kmeans|none)$")
+    method: str = Field(pattern=r"^(hdbscan|agglomerative|kmeans|gmm|spectral|none)$")
 
 
 class SaveRequest(BaseModel):

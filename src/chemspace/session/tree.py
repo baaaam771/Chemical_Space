@@ -366,7 +366,7 @@ class ExplorationSession:
         """Re-cluster a node in place with a different method, reusing its coords
         (no re-embed). The choice becomes the session default, so later nodes use
         it too. ``method`` is one of hdbscan / agglomerative / kmeans / none."""
-        allowed = {"hdbscan", "agglomerative", "kmeans", "none"}
+        allowed = {"hdbscan", "agglomerative", "kmeans", "gmm", "spectral", "none"}
         if method not in allowed:
             raise ValueError(f"unknown cluster method {method!r}; use one of {sorted(allowed)}")
         node = self.node(node_id)

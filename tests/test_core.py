@@ -1470,6 +1470,23 @@ def test_cluster_agglomerative_gives_requested_k():
     assert method.startswith("agglomerative")
 
 
+def test_cluster_gmm_and_spectral_give_requested_k():
+    from chemspace.placement import ClusterConfig, _cluster
+
+    rng = np.random.default_rng(3)
+    emb = np.vstack(
+        [
+            rng.normal([0, 0], 0.1, (30, 2)),
+            rng.normal([6, 6], 0.1, (30, 2)),
+            rng.normal([0, 6], 0.1, (30, 2)),
+        ]
+    ).astype(np.float32)
+    for method in ("gmm", "spectral"):
+        lab, m = _cluster(emb, emb, "euclidean", ClusterConfig(method=method, n_clusters=3))
+        assert len({int(c) for c in lab}) == 3, method
+        assert m.startswith(method)
+
+
 def test_recluster_reuses_coords_and_keeps_uncovered():
     from chemspace.placement import ClusterConfig, Placement, UNCOVERED, recluster
 
