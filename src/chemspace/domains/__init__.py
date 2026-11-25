@@ -12,11 +12,15 @@ from chemspace.domains.builtin import (
     MoietyDomain,
     PhysChemDomain,
     TargetActivityDomain,
+    TargetCooccurDomain,
     TargetDomain,
+    TargetFamilyActivityDomain,
     TargetFamilyDomain,
     TargetFamilyMapDomain,
     TargetKnowledgeDomain,
     TargetSeqDomain,
+    TargetSvdDomain,
+    TargetTerritoryDomain,
 )
 
 __all__ = [
@@ -29,6 +33,10 @@ __all__ = [
     "TargetFamilyDomain",
     "TargetFamilyMapDomain",
     "TargetActivityDomain",
+    "TargetFamilyActivityDomain",
+    "TargetSvdDomain",
+    "TargetCooccurDomain",
+    "TargetTerritoryDomain",
     "TargetSeqDomain",
     "TargetKnowledgeDomain",
     "MoietyDomain",
@@ -43,6 +51,10 @@ BUILTIN = (
     TargetFamilyDomain,
     TargetFamilyMapDomain,
     TargetActivityDomain,
+    TargetFamilyActivityDomain,
+    TargetSvdDomain,
+    TargetCooccurDomain,
+    TargetTerritoryDomain,
     MoietyDomain,
     ModalityDomain,
 )

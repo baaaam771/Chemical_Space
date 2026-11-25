@@ -649,6 +649,187 @@ class TargetActivityDomain(TargetDomain):
         return df["target_l1"].astype(str).replace("", "미분류")
 
 
+def _family_colour(ds, compound_ids):
+    """Colour any target-derived domain by the curated L1 family, blanks -> 미분류."""
+    df = ds.frame(compound_ids)
+    if "target_l1" not in df.columns:
+        return None
+    return df["target_l1"].astype(str).replace("", "미분류")
+
+
+class TargetFamilyActivityDomain(TargetDomain):
+    """A — dense per-family activity profile.
+
+    Each compound becomes a short vector over the curated subfamilies, weighted
+    by its strongest pchembl on each. The sparse thousand-target token space
+    (which scatters) collapses to a dense low-dim one that clusters as cleanly as
+    the continuous physchem descriptors.
+    """
+
+    name = "target_fam_activity"
+    label = "표적(계열활성)"
+    description = (
+        "큐레이션 계열별 최강 pchembl의 밀집 벡터 — 희소 표적을 저차원으로 압축해 "
+        "물성처럼 또렷한 군집 (부분집합 z-score, euclidean)."
+    )
+
+    def featurize(self, compound_ids: Sequence[str]) -> DomainFeatures:
+        from chemspace.data.dataset import DEFAULT_ACTIVITY_PCHEMBL
+        from chemspace.data.target_class import curate
+
+        ids = tuple(compound_ids)
+        tg = self.ds.targets
+        cols = [c for c in ("chembl_id", "l1", "l2", "l3", "l4", "pchembl_value") if c in tg.columns]
+        sub = tg[tg["chembl_id"].isin(set(ids))][cols].copy()
+        for c in ("l1", "l2", "l3", "l4"):
+            if c not in sub.columns:
+                sub[c] = ""
+        if not sub.empty:
+            combos = sub[["l1", "l2", "l3", "l4"]].drop_duplicates()
+            fam = combos.apply(
+                lambda r: " > ".join(x for x in curate(r["l1"], r["l2"], r["l3"], r["l4"]) if x),
+                axis=1,
+            )
+            combos = combos.assign(fam=fam.values)
+            sub = sub.merge(combos, on=["l1", "l2", "l3", "l4"], how="left")
+            sub = sub[sub["fam"].astype(str) != ""]
+        if sub.empty:
+            return DomainFeatures(
+                X=np.zeros((len(ids), 0), np.float32),
+                compound_ids=ids,
+                covered=np.zeros(len(ids), bool),
+                feature_names=(),
+                metric="euclidean",
+                kind="continuous",
+                notes={"families": 0},
+            )
+        sub["pch"] = pd.to_numeric(sub["pchembl_value"], errors="coerce").fillna(
+            DEFAULT_ACTIVITY_PCHEMBL
+        ) if "pchembl_value" in sub.columns else float(DEFAULT_ACTIVITY_PCHEMBL)
+        piv = sub.pivot_table(index="chembl_id", columns="fam", values="pch", aggfunc="max")
+        fams = sorted(piv.columns)
+        raw = piv.reindex(index=list(ids), columns=fams).fillna(0.0).to_numpy(np.float64)
+        covered = (raw != 0).any(axis=1)
+        Z, notes = _standardize_covered(raw, covered)
+        return DomainFeatures(
+            X=Z,
+            compound_ids=ids,
+            covered=covered,
+            feature_names=tuple(f"fam{i}" for i in range(Z.shape[1])),
+            metric="euclidean",
+            kind="continuous",
+            notes={**notes, "families": len(fams)},
+        )
+
+    def color_series(self, compound_ids):
+        s = _family_colour(self.ds, compound_ids)
+        return s if s is not None else super().color_series(compound_ids)
+
+
+class TargetSvdDomain(TargetDomain):
+    """B — latent-factor compression of the sparse target token matrix.
+
+    TruncatedSVD squeezes the high-cardinality binary target vectors into a dense
+    ~50-dim space before UMAP, so near-orthogonal sparse rows gain shared axes and
+    the map is smoother than the raw Jaccard one.
+    """
+
+    name = "target_svd"
+    label = "표적(잠재)"
+    description = "표적 토큰 행렬을 잠재요인(SVD ~50차원)으로 압축 후 배치 — 희소성을 줄여 더 매끈한 군집 (euclidean)."
+    N_COMPONENTS = 50
+
+    def featurize(self, compound_ids: Sequence[str]) -> DomainFeatures:
+        from sklearn.decomposition import TruncatedSVD
+
+        ids = tuple(compound_ids)
+        Xb, _names, notes = multi_hot(ids, self.ds.target_terms, self.min_support)
+        covered = np.array([c in self.ds.target_terms for c in ids], dtype=bool)
+        if Xb.shape[1] >= 3:
+            k = int(min(self.N_COMPONENTS, Xb.shape[1] - 1))
+            Z = TruncatedSVD(n_components=k, random_state=0).fit_transform(
+                Xb.astype(np.float64)
+            ).astype(np.float32)
+        else:
+            Z = Xb.astype(np.float32)
+        return DomainFeatures(
+            X=Z,
+            compound_ids=ids,
+            covered=covered,
+            feature_names=tuple(f"svd{i}" for i in range(Z.shape[1])),
+            metric="euclidean",
+            kind="continuous",
+            notes={**notes, "svd_dim": int(Z.shape[1])},
+        )
+
+    def color_series(self, compound_ids):
+        s = _family_colour(self.ds, compound_ids)
+        return s if s is not None else super().color_series(compound_ids)
+
+
+class TargetCooccurDomain(TargetDomain):
+    """C — target2vec: embed targets by co-occurrence, a compound is their mean.
+
+    Targets hit together by the same compounds get nearby latent vectors (an SVD
+    of the log co-occurrence matrix, the classic word-embedding recipe), so a
+    compound placed at the mean of its targets' vectors carries target-relatedness
+    the raw one-hot tokens miss.
+    """
+
+    name = "target2vec"
+    label = "표적(동시출현)"
+    description = (
+        "같은 화합물이 함께 치는 표적으로 표적을 임베딩(동시출현 SVD), 화합물은 그 평균 — "
+        "표적 간 관계로 구조화 (euclidean)."
+    )
+    DIM = 32
+
+    def featurize(self, compound_ids: Sequence[str]) -> DomainFeatures:
+        from sklearn.decomposition import TruncatedSVD
+
+        ids = tuple(compound_ids)
+        Xb, _names, notes = multi_hot(ids, self.ds.target_terms, self.min_support)
+        covered = np.array([c in self.ds.target_terms for c in ids], dtype=bool)
+        v = Xb.shape[1]
+        if v >= 3 and Xb.shape[0] >= 3:
+            xb = Xb.astype(np.float64)
+            co = xb.T @ xb  # (v, v) co-occurrence counts
+            k = int(min(self.DIM, v - 1))
+            tv = TruncatedSVD(n_components=k, random_state=0).fit_transform(np.log1p(co))
+            rs = xb.sum(axis=1, keepdims=True)
+            rs[rs == 0] = 1.0
+            Z = ((xb @ tv) / rs).astype(np.float32)
+        else:
+            Z = Xb.astype(np.float32)
+        return DomainFeatures(
+            X=Z,
+            compound_ids=ids,
+            covered=covered,
+            feature_names=tuple(f"t2v{i}" for i in range(Z.shape[1])),
+            metric="euclidean",
+            kind="continuous",
+            notes={**notes, "dim": int(Z.shape[1])},
+        )
+
+    def color_series(self, compound_ids):
+        s = _family_colour(self.ds, compound_ids)
+        return s if s is not None else super().color_series(compound_ids)
+
+
+class TargetTerritoryDomain(TargetFamilyMapDomain):
+    """E — near-territory layout: B with a much stronger family weight.
+
+    Pushing UMAP's target_weight close to 1 makes the curated family dominate the
+    layout, so families form near-disjoint territories (approximating the '분류로
+    영역을 먼저 나눈다' method) at the cost of within-family distances meaning less.
+    """
+
+    name = "target_territory"
+    label = "표적(영역)"
+    description = "B의 계열 가중치를 크게 높여(≈0.9) 가족이 거의 겹치지 않는 영역으로 — 영역 우선 배치 근사."
+    TARGET_WEIGHT = 0.9
+
+
 # --------------------------------------------------------------------------- #
 
 

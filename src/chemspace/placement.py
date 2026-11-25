@@ -241,6 +241,29 @@ def _embed(
         return _pca(X), "pca", {"embed_fallback": "n too small for umap"} if n < 10 else {}
 
     n_neighbors = int(min(cfg.n_neighbors, max(2, n - 1)))
+    # GPU (cuML) for the unsupervised euclidean/cosine cases -- ~50x faster on a
+    # large map. Jaccard and semi-supervised (y) fall through to the CPU UMAP
+    # below, which cuML does not cover identically; so does any failure (no GPU,
+    # no cuML, an unsupported option), so the result is unchanged, only slower.
+    if y is None and metric in ("euclidean", "cosine"):
+        try:
+            from cuml.manifold import UMAP as cuUMAP
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                emb = cuUMAP(
+                    n_components=2,
+                    n_neighbors=n_neighbors,
+                    min_dist=cfg.min_dist,
+                    metric=metric,
+                    random_state=cfg.random_state,
+                ).fit_transform(np.ascontiguousarray(X, dtype=np.float32))
+            emb = np.asarray(emb, dtype=np.float32)
+            if np.isfinite(emb).all():
+                return emb, f"cuml-umap({metric},k={n_neighbors})", {"device": "gpu"}
+        except Exception as exc:  # noqa: BLE001 - cuML/GPU optional; CPU handles it
+            log.info("cuML UMAP unavailable (%s); using CPU UMAP", exc)
+
     try:
         import umap
 
