@@ -1426,6 +1426,52 @@ def test_place_threads_supervision_without_crashing():
     assert p.coords.shape == (n, 2)
 
 
+def test_labels_as_clusters_remaps_and_keeps_noise():
+    from chemspace.placement import _labels_as_clusters
+
+    lab, method = _labels_as_clusters(np.array([2, 2, 5, -1, 5]))
+    assert list(lab) == [0, 0, 1, -1, 1]  # 2->0, 5->1, negative stays noise
+    assert method.startswith("labels")
+
+
+def test_place_uses_cluster_labels_instead_of_hdbscan():
+    from chemspace.placement import EmbedConfig, place
+
+    n = 12
+    X = np.random.default_rng(1).normal(size=(n, 4)).astype(np.float32)
+    codes = np.array([0, 0, 0, 1, 1, 1, 2, 2, 2, 2, 2, 2], dtype=np.int64)
+    feat = DomainFeatures(
+        X=X,
+        compound_ids=tuple(f"C{i}" for i in range(n)),
+        covered=np.ones(n, dtype=bool),
+        feature_names=("a", "b", "c", "d"),
+        metric="euclidean",
+        kind="continuous",
+        cluster_labels=codes,
+    )
+    p = place(feat, embed=EmbedConfig(method="pca"))  # pca: fast, geometry irrelevant here
+    assert p.cluster_method.startswith("labels")
+    assert list(p.labels) == list(codes)  # clusters are exactly the given groups
+
+
+def test_target_family_map_clusters_by_family():
+    from chemspace.domains.builtin import TargetFamilyMapDomain
+
+    multi = pd.DataFrame(
+        {
+            "target_l1": ["Kinase", "Kinase", "GPCR", ""],
+            "target_l2": ["Tyrosine kinase (TK)", "CMGC (CDK·MAPK·GSK3)", "Family A GPCR", ""],
+        },
+        index=["K1", "K2", "G1", "U1"],
+    )
+    f = TargetFamilyMapDomain(_family_map_ds(multi)).featurize(list(multi.index))
+    assert f.cluster_labels is not None
+    assert list(f.cluster_labels) == list(f.supervision)  # clusters == the family codes
+    assert f.cluster_labels[0] == f.cluster_labels[1]      # both Kinase -> one cluster
+    assert f.cluster_labels[0] != f.cluster_labels[2]      # Kinase vs GPCR
+    assert f.cluster_labels[3] == -1                        # uncovered -> noise
+
+
 def test_domain_features_rejects_mismatched_supervision():
     with pytest.raises(ValueError):
         DomainFeatures(

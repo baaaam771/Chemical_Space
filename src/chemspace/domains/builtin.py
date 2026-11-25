@@ -410,6 +410,11 @@ class TargetFamilyMapDomain(TargetDomain):
     supervises by L2 instead -> the subfamilies (TK, CMGC, …) separate. Coverage
     is the compounds with a curated family; the rest (no protein target, or a
     target outside the eight families) are placed in the uncovered band.
+
+    The clustering is label-driven too: each point's cluster is its curated family
+    (the same adaptive code), so the clusters ARE the continents -- selecting a
+    cluster selects a whole family -- instead of HDBSCAN carving each continent
+    into many density blobs that disagree with the colouring.
     """
 
     name = "target_family_map"
@@ -464,6 +469,10 @@ class TargetFamilyMapDomain(TargetDomain):
             notes={**notes, "supervised_families": n_fam},
             supervision=sup,
             supervision_weight=self.TARGET_WEIGHT,
+            # The clusters ARE the curated families (adaptive: L1 across families,
+            # L2 within one), so the grouping matches the colouring exactly and the
+            # continents are the clusters -- no HDBSCAN over-segmentation.
+            cluster_labels=sup,
         )
 
     def color_series(self, compound_ids: Sequence[str]) -> pd.Series | None:

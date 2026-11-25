@@ -81,6 +81,17 @@ class DomainFeatures:
     """How strongly ``supervision`` pulls, in ``[0, 1]`` (UMAP ``target_weight``):
     0 ignores the labels, 1 lets them dominate. Ignored when supervision is None."""
 
+    cluster_labels: np.ndarray | None = None
+    """(n,) int cluster assignment to use *instead of* unsupervised clustering.
+
+    When a domain already knows the grouping -- e.g. a curated protein family --
+    re-discovering it with HDBSCAN is lossy (it over-segments and emits noise).
+    Setting this makes each point's cluster its given label, so "the clusters are
+    the families" with no mismatch against the colouring. ``-1`` is ignored
+    (clustered as noise); covered points should carry a real code. ``None`` keeps
+    the normal density clustering.
+    """
+
     def __post_init__(self) -> None:
         n, d = self.X.shape
         if n != len(self.compound_ids):
@@ -92,6 +103,10 @@ class DomainFeatures:
         if self.supervision is not None and self.supervision.shape[0] != n:
             raise ValueError(
                 f"X has {n} rows but supervision has {self.supervision.shape[0]}"
+            )
+        if self.cluster_labels is not None and self.cluster_labels.shape[0] != n:
+            raise ValueError(
+                f"X has {n} rows but cluster_labels has {self.cluster_labels.shape[0]}"
             )
 
     @property

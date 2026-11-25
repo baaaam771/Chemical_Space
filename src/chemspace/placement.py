@@ -195,7 +195,13 @@ def place(
     if sanitized:
         notes["non_finite_coords"] = sanitized
 
-    lab, cmethod = _cluster(emb, Xf, features.metric, cluster)
+    if features.cluster_labels is not None:
+        # The domain already knows the grouping (e.g. a curated family): use it
+        # directly instead of re-discovering it with HDBSCAN. Remap the covered
+        # rows' codes to contiguous 0..k-1, keeping -1 as noise.
+        lab, cmethod = _labels_as_clusters(features.cluster_labels[fit])
+    else:
+        lab, cmethod = _cluster(emb, Xf, features.metric, cluster)
     coords[fit] = emb
     labels[fit] = lab
 
@@ -338,6 +344,17 @@ def _uncovered_band(emb: np.ndarray, k: int) -> np.ndarray:
 
 
 # ----------------------------------------------------------------- clustering
+
+
+def _labels_as_clusters(codes: np.ndarray) -> tuple[np.ndarray, str]:
+    """Use given per-point codes as clusters: remap to contiguous 0..k-1, with
+    any negative code kept as noise (-1). For a domain that already knows the
+    grouping, so the clusters match it exactly instead of being re-discovered."""
+    codes = np.asarray(codes)
+    uniq = sorted({int(c) for c in codes if int(c) >= 0})
+    remap = {c: i for i, c in enumerate(uniq)}
+    lab = np.array([remap.get(int(c), -1) for c in codes], dtype=np.int32)
+    return lab, f"labels(k={len(uniq)})"
 
 
 def _cluster(
