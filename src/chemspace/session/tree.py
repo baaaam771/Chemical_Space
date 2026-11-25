@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterable, Sequence
@@ -36,7 +36,14 @@ from chemspace.data.dataset import Dataset
 if TYPE_CHECKING:  # pragma: no cover
     from chemspace.cache import PlacementCache
 from chemspace.domains import DomainRegistry, default_registry
-from chemspace.placement import ClusterConfig, EmbedConfig, Placement, UNCOVERED, place
+from chemspace.placement import (
+    ClusterConfig,
+    EmbedConfig,
+    Placement,
+    UNCOVERED,
+    place,
+    recluster,
+)
 from chemspace.session.filters import drug_layer_mask, resolve as resolve_filter
 from chemspace.session.korean import ro
 
@@ -354,6 +361,18 @@ class ExplorationSession:
             ),
             note,
         )
+
+    def recluster_node(self, node_id: str, method: str) -> Node:
+        """Re-cluster a node in place with a different method, reusing its coords
+        (no re-embed). The choice becomes the session default, so later nodes use
+        it too. ``method`` is one of hdbscan / agglomerative / kmeans / none."""
+        allowed = {"hdbscan", "agglomerative", "kmeans", "none"}
+        if method not in allowed:
+            raise ValueError(f"unknown cluster method {method!r}; use one of {sorted(allowed)}")
+        node = self.node(node_id)
+        self.cluster_cfg = replace(self.cluster_cfg, method=method)
+        recluster(node.placement, self.cluster_cfg)
+        return node
 
     # ---------------------------------------------------------------- reading
 

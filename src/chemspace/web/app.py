@@ -79,6 +79,11 @@ class SwitchRequest(BaseModel):
     note: str = ""
 
 
+class ReclusterRequest(BaseModel):
+    node_id: str
+    method: str = Field(pattern=r"^(hdbscan|agglomerative|kmeans|none)$")
+
+
 class SaveRequest(BaseModel):
     # No dots, so ".." is not a legal name -- the old pattern allowed it and a
     # save could be aimed outside the sessions directory. The path is also
@@ -553,6 +558,15 @@ def create_app(
     def get_points(session_id: str, node_id: str, request: Request):
         session = need(session_id, request)
         return node_points(session, need_node(session, node_id))
+
+    @app.post("/api/sessions/{session_id}/recluster")
+    def recluster_node(session_id: str, req: ReclusterRequest, request: Request):
+        # Fast: re-clusters the node's existing coords with the chosen method, no
+        # re-embed, so it returns points directly instead of a background job.
+        session = need(session_id, request)
+        need_node(session, req.node_id)
+        node = session.recluster_node(req.node_id, req.method)
+        return node_points(session, node)
 
     @app.get("/api/sessions/{session_id}/nodes/{node_id}/domain-coverage")
     def get_domain_coverage(session_id: str, node_id: str, request: Request):

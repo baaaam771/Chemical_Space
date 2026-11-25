@@ -1454,6 +1454,49 @@ def test_place_uses_cluster_labels_instead_of_hdbscan():
     assert list(p.labels) == list(codes)  # clusters are exactly the given groups
 
 
+def test_cluster_agglomerative_gives_requested_k():
+    from chemspace.placement import ClusterConfig, _cluster
+
+    rng = np.random.default_rng(0)
+    emb = np.vstack(
+        [
+            rng.normal([0, 0], 0.1, (20, 2)),
+            rng.normal([6, 6], 0.1, (20, 2)),
+            rng.normal([0, 6], 0.1, (20, 2)),
+        ]
+    ).astype(np.float32)
+    lab, method = _cluster(emb, emb, "euclidean", ClusterConfig(method="agglomerative", n_clusters=3))
+    assert len({int(c) for c in lab}) == 3
+    assert method.startswith("agglomerative")
+
+
+def test_recluster_reuses_coords_and_keeps_uncovered():
+    from chemspace.placement import ClusterConfig, Placement, UNCOVERED, recluster
+
+    rng = np.random.default_rng(1)
+    coords = np.vstack(
+        [rng.normal([0, 0], 0.1, (15, 2)), rng.normal([9, 9], 0.1, (15, 2)), np.zeros((5, 2))]
+    ).astype(np.float32)
+    labels = np.array([0] * 30 + [UNCOVERED] * 5, dtype=np.int32)
+    p = Placement(
+        coords=coords,
+        labels=labels,
+        compound_ids=tuple(f"C{i}" for i in range(35)),
+        domain="d",
+        embed_method="umap",
+        cluster_method="hdbscan",
+        metric="euclidean",
+        n_covered=30,
+        notes={},
+    )
+    before = p.coords.copy()
+    recluster(p, ClusterConfig(method="agglomerative", n_clusters=2))
+    assert p.cluster_method.startswith("agglomerative")
+    assert (p.labels[30:] == UNCOVERED).all()               # uncovered untouched
+    assert len({int(c) for c in p.labels[:30]}) == 2        # two groups among covered
+    assert np.array_equal(p.coords, before)                 # coords reused, not re-embedded
+
+
 def test_target_family_map_clusters_by_family():
     from chemspace.domains.builtin import TargetFamilyMapDomain
 

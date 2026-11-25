@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 import warnings
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 
@@ -24,7 +24,7 @@ from chemspace.domains.base import DomainFeatures
 
 log = logging.getLogger(__name__)
 
-__all__ = ["Placement", "EmbedConfig", "ClusterConfig", "place", "UNCOVERED"]
+__all__ = ["Placement", "EmbedConfig", "ClusterConfig", "place", "recluster", "UNCOVERED"]
 
 #: Cluster id for compounds with no data in the current domain.
 UNCOVERED = -2
@@ -357,6 +357,23 @@ def _labels_as_clusters(codes: np.ndarray) -> tuple[np.ndarray, str]:
     return lab, f"labels(k={len(uniq)})"
 
 
+def recluster(p: Placement, cfg: ClusterConfig) -> Placement:
+    """Re-cluster an existing placement's covered points on their 2-D coords,
+    reusing the embedding (no re-UMAP) -- for switching cluster method from the
+    UI cheaply. Mutates and returns ``p``. Uncovered points stay uncovered."""
+    fit = p.labels != UNCOVERED
+    labels = np.full(p.coords.shape[0], UNCOVERED, dtype=np.int32)
+    cmethod = "none"
+    if int(fit.sum()) >= 1:
+        sub = np.ascontiguousarray(p.coords[fit], dtype=np.float64)
+        lab, cmethod = _cluster(sub, sub, "euclidean", replace(cfg, on="coords"))
+        labels[fit] = lab
+    p.labels = labels
+    p.cluster_method = cmethod
+    p.notes = {**p.notes, "reclustered": cfg.method}
+    return p
+
+
 def _cluster(
     emb: np.ndarray, X: np.ndarray, metric: str, cfg: ClusterConfig
 ) -> tuple[np.ndarray, str]:
@@ -375,6 +392,32 @@ def _cluster(
             emb if cfg.on == "coords" else X
         )
         return lab.astype(np.int32), f"kmeans(k={k})"
+
+    if cfg.method == "agglomerative":
+        from sklearn.cluster import AgglomerativeClustering
+
+        # Hierarchical, so cutting at a cluster count gives the same tree's coarse
+        # level -- a natural fit for the L1/L2 drill-down. Ward needs Euclidean,
+        # which the 2-D coords are; on raw features it falls back to the metric.
+        k = int(min(cfg.n_clusters, max(2, n)))
+        if cfg.on == "features" and metric == "jaccard":
+            lab = AgglomerativeClustering(
+                n_clusters=k, metric="jaccard", linkage="average"
+            ).fit_predict(np.ascontiguousarray(X, dtype=np.float64))
+            return lab.astype(np.int32), f"agglomerative(k={k})"
+        data = np.ascontiguousarray(emb if cfg.on == "coords" else X, dtype=np.float64)
+        # A kNN connectivity graph keeps it feasible at scale: the unconstrained
+        # tree is O(n^2) in memory and hangs past a few thousand points. The
+        # constraint also makes the clusters spatially contiguous on the map.
+        conn = None
+        if n > 2000:
+            from sklearn.neighbors import kneighbors_graph
+
+            conn = kneighbors_graph(data, n_neighbors=min(15, n - 1), include_self=False)
+        lab = AgglomerativeClustering(
+            n_clusters=k, linkage="ward", connectivity=conn
+        ).fit_predict(data)
+        return lab.astype(np.int32), f"agglomerative(k={k})"
 
     from sklearn.cluster import HDBSCAN
 

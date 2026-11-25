@@ -77,6 +77,15 @@
     <button type="button" data-level="l2" title="세부 분류(L2)로 색칠">세부</button>
   </span>
 
+  <label>군집 방식
+    <select id="clusterSelect" title="현재 지도의 점을 다른 알고리즘으로 다시 묶습니다 (재배치 없이 빠르게)">
+      <option value="hdbscan">밀도 (HDBSCAN)</option>
+      <option value="agglomerative">계층 (Agglomerative)</option>
+      <option value="kmeans">분할 (K-Means)</option>
+      <option value="none">군집 없음</option>
+    </select>
+  </label>
+
   <span class="spacer"></span>
   <button id="saveBtn" class="ghost">세션 저장</button>
   <button id="logoutBtn" class="ghost" title="로그아웃">나가기</button>

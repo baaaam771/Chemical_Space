@@ -1291,6 +1291,30 @@ function wire() {
   });
   syncLevelToggle();
 
+  // 군집 방식: re-cluster the current map with another algorithm, in place and
+  // fast (no re-embed), then colour by the new groups so the effect is visible.
+  const clusterSel = $("clusterSelect");
+  if (clusterSel) {
+    clusterSel.onchange = (e) => guarded(async () => {
+      if (!state.nodeId) return;
+      const method = e.target.value;
+      showBusy(true, "다시 묶는 중…");
+      try {
+        const points = await post(`/api/sessions/${state.sessionId}/recluster`, {
+          node_id: state.nodeId,
+          method,
+        });
+        state.points = points;
+        state.clusterLabels = null;     // cluster ids changed -> drop stale names
+        state.colorDomain = "cluster";  // show the new grouping
+        colorSel.value = "cluster";
+        applyColorChange();
+      } finally {
+        showBusy(false);
+      }
+    });
+  }
+
   $("saveBtn").onclick = () => guarded(async () => {
     /* Ask for a name. It used to send "web" for everybody, which on a shared
      * server meant the second person to save destroyed the first person's
