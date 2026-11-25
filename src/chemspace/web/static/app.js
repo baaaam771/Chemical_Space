@@ -382,9 +382,7 @@ function renderLegend(legend, groups) {
         ` title="필터 해제 — 전체 보기">✕ 전체 보기 (필터 ${iso.size})</div>`
       );
     }
-    let shown = 0;
     for (const g of groups) {
-      if (shown >= 30) break;
       const kids = g.children.map((c) => c.name);
       const anyOn = iso.size === 0 || kids.some((n) => iso.has(n));
       rows.push(
@@ -396,8 +394,6 @@ function renderLegend(legend, groups) {
         `<span class="count">${g.count.toLocaleString()}</span></div>`
       );
       for (const c of g.children) {
-        if (shown >= 30) break;
-        shown += 1;
         const off = iso.size > 0 && !iso.has(c.name);
         rows.push(
           `<div class="legend-row legend-child legend-clickable${off ? " legend-off" : ""}"` +
@@ -413,7 +409,7 @@ function renderLegend(legend, groups) {
     return;
   }
 
-  const rows = [...legend.entries()].slice(0, 30).map(
+  const rows = [...legend.entries()].map(
     ([name, [color, count, label, cid]]) => {
       if (overlay) {
         const off = iso.size > 0 && !iso.has(name);
@@ -449,7 +445,6 @@ function renderLegend(legend, groups) {
       );
     }
   );
-  if (legend.size > 30) rows.push(`<div class="muted small">… 외 ${legend.size - 30}개</div>`);
   if (iso.size) {
     rows.unshift(
       `<div class="legend-row legend-clickable legend-reset" data-reset="1"` +
