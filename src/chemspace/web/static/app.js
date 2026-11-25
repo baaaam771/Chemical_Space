@@ -1300,6 +1300,7 @@ function wire() {
       const method = e.target.value;
       showBusy(true, "다시 묶는 중…");
       try {
+        const base = `/api/sessions/${state.sessionId}/nodes/${state.nodeId}`;
         const points = await post(`/api/sessions/${state.sessionId}/recluster`, {
           node_id: state.nodeId,
           method,
@@ -1309,6 +1310,12 @@ function wire() {
         state.colorDomain = "cluster";  // show the new grouping
         colorSel.value = "cluster";
         applyColorChange();
+        // Refresh the status line (cluster count / method / noise) and the
+        // cluster panel + legend names, which were computed for the old grouping.
+        const node = await api(base);
+        state.node = node;
+        renderStatus(node);
+        await refreshPanels(state.nodeId);
       } finally {
         showBusy(false);
       }
