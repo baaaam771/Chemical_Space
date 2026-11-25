@@ -205,6 +205,17 @@ function colourPoints(pts) {
       });
     if (counts.has(NOISE)) legend.set("noise", [NOISE_COLOR, counts.get(NOISE)]);
     if (counts.has(UNCOVERED)) legend.set("데이터 없음", [UNCOVERED_COLOR, counts.get(UNCOVERED)]);
+    // Isolate a cluster the same way an overlay value is isolated: the kept
+    // clusters stay bright and larger, the rest fade to a small grey backdrop.
+    if (state.isolate.size) {
+      const base = markerBase(pts);
+      colors = pts.cluster.map((c, k) =>
+        state.isolate.has(String(c)) ? colors[k] : dimColor(colors[k])
+      );
+      sizes = pts.cluster.map((c) =>
+        state.isolate.has(String(c)) ? base + 1 : Math.max(2, base - 3)
+      );
+    }
   } else {
     const field = pts[state.colorBy] ? state.colorBy : "modality";
     const values = pts[field].map((v) => v || "미분류");
@@ -419,19 +430,27 @@ function renderLegend(legend, groups) {
         ? `<span class="legend-label" title="${escapeHtml(label)}">${escapeHtml(label)}</span>`
         : "";
       const clickable = cid != null && cid >= 0;
+      // Cluster rows: clicking the row isolates that cluster (same as an overlay
+      // value), and the ⓘ button opens its card -- two distinct actions that used
+      // to collide on one click.
+      const off = clickable && iso.size > 0 && !iso.has(String(cid));
       return (
-        `<div class="legend-row${clickable ? " legend-clickable" : ""}"` +
+        `<div class="legend-row${clickable ? " legend-clickable" : ""}${off ? " legend-off" : ""}"` +
         (clickable ? ` data-cluster="${cid}"` : "") +
-        ` title="${clickable ? "클릭하면 군집 특징 보기 — " : ""}${escapeHtml(label || name)}">` +
+        ` title="${clickable ? "클릭하면 이 군집만 보기" : escapeHtml(label || name)}">` +
         `<span class="swatch" style="background:${color}"></span>` +
         `<span class="legend-name">${escapeHtml(name)}</span>` +
         tag +
-        `<span class="count">${count.toLocaleString()}</span></div>`
+        `<span class="count">${count.toLocaleString()}</span>` +
+        (clickable
+          ? ` <button type="button" class="legend-card-btn" data-card="${cid}" title="군집 카드 보기">ⓘ</button>`
+          : "") +
+        `</div>`
       );
     }
   );
   if (legend.size > 30) rows.push(`<div class="muted small">… 외 ${legend.size - 30}개</div>`);
-  if (overlay && iso.size) {
+  if (iso.size) {
     rows.unshift(
       `<div class="legend-row legend-clickable legend-reset" data-reset="1"` +
       ` title="필터 해제 — 전체 보기">✕ 전체 보기 (필터 ${iso.size})</div>`
@@ -1380,8 +1399,21 @@ function wire() {
       if (state.points) drawPlot(state.points);
       return;
     }
+    // The ⓘ button opens the cluster card; a click anywhere else on a cluster
+    // row isolates that cluster (show only it, dim the rest) -- the two were one
+    // overloaded click before.
+    const cardBtn = e.target.closest("[data-card]");
+    if (cardBtn) {
+      openClusterCard(cardBtn.dataset.card);
+      return;
+    }
     const row = e.target.closest("[data-cluster]");
-    if (row) openClusterCard(row.dataset.cluster);
+    if (row) {
+      const cid = row.dataset.cluster;
+      if (state.isolate.has(cid)) state.isolate.delete(cid);
+      else state.isolate.add(cid);
+      if (state.points) drawPlot(state.points);
+    }
   });
 
   // Close the detail modal: backdrop click, the × button, or Escape. A

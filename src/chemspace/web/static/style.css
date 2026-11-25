@@ -326,6 +326,13 @@ tr.special td { color: var(--muted); font-style: italic; }
 /* An overlay value filtered out: the row fades but stays readable and clickable. */
 .legend-off { opacity: 0.4; }
 .legend-reset { font-weight: 600; color: var(--muted); }
+/* The ⓘ on a cluster row opens its card; the row itself isolates the cluster. */
+.legend-card-btn {
+  flex: none; width: 16px; height: 16px; padding: 0; line-height: 14px;
+  border: 1px solid var(--line); border-radius: 50%;
+  background: transparent; color: var(--muted); font-size: 11px; cursor: pointer;
+}
+.legend-card-btn:hover { color: var(--accent); border-color: var(--accent); }
 /* Roll-up legend: an L1 parent header, with its L2 children indented beneath.
  * The parent has no swatch (its children carry the colours) and its count is
  * the sum of theirs -- the containment, shown. */
