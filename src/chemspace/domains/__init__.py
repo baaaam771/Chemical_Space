@@ -12,6 +12,7 @@ from chemspace.domains.builtin import (
     MoietyDomain,
     PhysChemDomain,
     TargetActivityDomain,
+    TargetAnchoredDomain,
     TargetAtlasDomain,
     TargetCooccurDomain,
     TargetDomain,
@@ -39,6 +40,7 @@ __all__ = [
     "TargetCooccurDomain",
     "TargetTerritoryDomain",
     "TargetAtlasDomain",
+    "TargetAnchoredDomain",
     "TargetSeqDomain",
     "TargetKnowledgeDomain",
     "MoietyDomain",
@@ -58,6 +60,7 @@ BUILTIN = (
     TargetCooccurDomain,
     TargetTerritoryDomain,
     TargetAtlasDomain,
+    TargetAnchoredDomain,
     MoietyDomain,
     ModalityDomain,
 )

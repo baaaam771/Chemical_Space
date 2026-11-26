@@ -927,6 +927,137 @@ class TargetAtlasDomain(TargetFamilyMapDomain):
         return np.column_stack([0.5 + 0.2 * np.cos(ang), 0.5 + 0.2 * np.sin(ang)])
 
 
+class TargetAnchoredDomain(TargetFamilyMapDomain):
+    """연관배치 — 한 연결된 공간 안에서 계열은 뭉치되 비슷한 계열끼리 가까이.
+
+    지도첩(``target_atlas``)은 계열을 **끊어진** 칸에 격자로 두어 계열 간 거리가 의미가
+    없었다. E(계열지도/영역)는 한 공간이지만 분리가 보장되지 않는다. 이 도메인은 둘의
+    가운데를 결정론적으로 잡는다:
+
+    * **계열 앵커는 계열 간 연관성으로 배치.** 각 계열의 ECFP 중심(centroid)을 구해 그
+      8개(또는 하위계열) 중심을 2D 주성분으로 펴면, **구조적으로 비슷한 계열끼리 가까이**
+      앉는다 — 격자의 임의 위치가 아니라 '계열 간 관계'가 좌표가 된다.
+    * **화합물은 자기 앵커 둘레에 구조(SVD)로 분산.** 분산 반경을 앵커 간격보다 작게
+      잡아, 계열 구름은 또렷이 **분리되면서도 전체는 한 연결 공간**을 이룬다(칸처럼 끊기지
+      않음).
+
+    군집은 계열 라벨 그대로라 분리는 깔끔하고(군집=계열), 무작위성이 없어 같은 부분집합은
+    늘 같은 지도를 그린다. 여러 계열이면 L1, 한 계열로 좁히면 L2로 앵커가 바뀐다.
+    """
+
+    name = "target_anchored"
+    label = "표적(연관배치)"
+    description = (
+        "계열 구조중심으로 앵커를 배치해 비슷한 계열끼리 가까이 — 그 둘레에 화합물을 "
+        "구조(SVD)로 분산. 한 연결 공간에서 계열은 분리, 군집=계열, 결정론적."
+    )
+
+    #: Anchors are normalised so the median nearest-anchor gap is 1; each family's
+    #: cloud is a disc of this radius. RADIUS just under half the gap keeps cores
+    #: separated while the halos touch -- one connected field, not isolated dots.
+    RADIUS = 0.70
+    #: Closest two anchors are pushed at least this far apart (in gap units), so a
+    #: pair of structurally similar families stays near but never collapses to one.
+    MIN_GAP = 0.88
+
+    def featurize(self, compound_ids: Sequence[str]) -> DomainFeatures:
+        from dataclasses import replace
+
+        base = super().featurize(compound_ids)
+        labels = self._family_labels(tuple(compound_ids))
+        coords = self._anchored_coords(base.X, labels, base.covered)
+        return replace(
+            base,
+            coords=coords,
+            notes={**base.notes, "layout": "anchored"},
+        )
+
+    def _anchored_coords(
+        self, X: np.ndarray, labels: np.ndarray, covered: np.ndarray
+    ) -> np.ndarray:
+        from sklearn.decomposition import TruncatedSVD
+
+        n = X.shape[0]
+        coords = np.zeros((n, 2), dtype=np.float32)
+        fams = sorted({str(labels[i]) for i in range(n) if covered[i]})
+        k = len(fams)
+        if k == 0:
+            return coords
+        masks = [covered & (labels == fam) for fam in fams]
+        cents = np.zeros((k, X.shape[1]), dtype=np.float64)
+        for i, m in enumerate(masks):
+            if m.any():
+                cents[i] = X[m].mean(axis=0)
+        anchors = _anchor_positions(cents, self.MIN_GAP)  # related families adjacent
+        for i, m in enumerate(masks):
+            local = TargetAtlasDomain._local_layout(X[m], TruncatedSVD)
+            local = (_minmax01(local) * 2.0 - 1.0) * self.RADIUS  # disc around 0
+            coords[m] = (anchors[i] + local).astype(np.float32)
+        return coords
+
+
+def _space_out(A: np.ndarray, min_gap: float, iters: int = 80) -> np.ndarray:
+    """Push any anchor pair closer than ``min_gap`` apart, keeping the layout's
+    relative geometry. A few deterministic relaxation passes; order-independent
+    enough for a handful of anchors."""
+    A = A.astype(np.float64).copy()
+    k = A.shape[0]
+    for _ in range(iters):
+        moved = False
+        for i in range(k):
+            for j in range(i + 1, k):
+                d = A[j] - A[i]
+                dist = float(np.hypot(d[0], d[1]))
+                if dist < min_gap:
+                    if dist < 1e-9:
+                        d = np.array([min_gap, 0.0]) if (i + j) % 2 == 0 else np.array([0.0, min_gap])
+                        dist = min_gap
+                    push = (min_gap - dist) / 2.0
+                    step = d / dist * push
+                    A[i] -= step
+                    A[j] += step
+                    moved = True
+        if not moved:
+            break
+    return A
+
+
+def _anchor_positions(cents: np.ndarray, min_gap: float) -> np.ndarray:
+    """2-D anchor per family from its feature centroid: the top-2 principal axes of
+    the centroids (so structurally similar families sit close), robust-scaled and
+    normalised to a median nearest-neighbour gap of 1, then spaced so no pair is
+    closer than ``min_gap``. Deterministic; a single family lands at the origin."""
+    k = cents.shape[0]
+    if k == 1:
+        return np.zeros((1, 2), dtype=np.float64)
+    C = cents - cents.mean(axis=0, keepdims=True)
+    try:
+        U, S, _ = np.linalg.svd(C, full_matrices=False)
+        A = (U[:, :2] * S[:2]).astype(np.float64)
+    except np.linalg.LinAlgError:  # pragma: no cover - degenerate centroids
+        ang = np.linspace(0.0, 2.0 * np.pi, k, endpoint=False)
+        A = np.column_stack([np.cos(ang), np.sin(ang)])
+    if A.shape[1] < 2:  # only one usable axis
+        A = np.column_stack([A[:, 0], np.zeros(k)])
+    # Deterministic sign per axis (SVD sign is arbitrary).
+    for j in range(2):
+        if A[int(np.argmax(np.abs(A[:, j]))), j] < 0:
+            A[:, j] *= -1.0
+    A = A - A.mean(axis=0)
+    # Robust radial scale so one outlier family does not squash the rest.
+    rad = np.sqrt((A ** 2).sum(axis=1))
+    med_r = float(np.median(rad)) or 1.0
+    A = A / med_r
+    # Normalise so the median nearest-neighbour gap is 1.
+    nn = [
+        min(float(np.hypot(*(A[i] - A[j]))) for j in range(k) if j != i)
+        for i in range(k)
+    ]
+    g = float(np.median(nn)) or 1.0
+    A = A / g
+    return _space_out(A, min_gap)
+
+
 # --------------------------------------------------------------------------- #
 
 
