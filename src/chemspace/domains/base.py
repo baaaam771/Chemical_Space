@@ -92,6 +92,18 @@ class DomainFeatures:
     the normal density clustering.
     """
 
+    coords: np.ndarray | None = None
+    """(n, 2) precomputed 2-D coordinates to use *instead of* embedding ``X``.
+
+    When a domain already knows where points should go -- e.g. a deterministic
+    partition that drops each curated family into its own fixed region of the
+    canvas -- it supplies the layout here and ``place`` skips UMAP, using these
+    coordinates for the covered rows directly. The embedding's randomness is gone,
+    so the same subset always draws the same map. ``None`` keeps the normal
+    embedding of ``X``. Only the covered rows' coordinates are read; uncovered
+    rows are still parked in the band by ``place``.
+    """
+
     def __post_init__(self) -> None:
         n, d = self.X.shape
         if n != len(self.compound_ids):
@@ -107,6 +119,10 @@ class DomainFeatures:
         if self.cluster_labels is not None and self.cluster_labels.shape[0] != n:
             raise ValueError(
                 f"X has {n} rows but cluster_labels has {self.cluster_labels.shape[0]}"
+            )
+        if self.coords is not None and self.coords.shape != (n, 2):
+            raise ValueError(
+                f"coords must be ({n}, 2) to match X, got {self.coords.shape}"
             )
 
     @property

@@ -830,6 +830,103 @@ class TargetTerritoryDomain(TargetFamilyMapDomain):
     TARGET_WEIGHT = 0.9
 
 
+def _minmax01(a: np.ndarray) -> np.ndarray:
+    """Scale each column to [0, 1] independently; a constant column -> 0.5."""
+    a = np.asarray(a, dtype=np.float64)
+    out = np.full_like(a, 0.5)
+    for j in range(a.shape[1]):
+        col = a[:, j]
+        lo, hi = float(col.min()), float(col.max())
+        if hi > lo:
+            out[:, j] = (col - lo) / (hi - lo)
+    return out
+
+
+class TargetAtlasDomain(TargetFamilyMapDomain):
+    """지도첩 — 큐레이션 계열을 캔버스의 고정 칸에 강제 분할 배치(겹침 0).
+
+    E(영역)는 UMAP ``target_weight``를 높여 가족이 '거의' 안 겹치게 한 **준지도**
+    근사였다. 이 도메인은 인코딩에 가족을 발견시키려 하지 않고, 아예 캔버스를 보이는
+    계열 수만큼의 칸으로 나눠 **각 계열을 자기 칸에만** 둔다. 칸이 서로 떨어져 있으니
+    계열 간 겹침은 구조적으로 0이고, 칸 안에서는 화학구조(ECFP)의 국소 분산 두 축
+    (TruncatedSVD)으로 정렬해 세부 구조도 읽힌다. UMAP의 무작위성이 없어 같은
+    부분집합은 언제나 같은 지도를 그린다 — '분류 값이 이미 있으니 수작업으로라도 강제로
+    모은다'를 결정론적으로 구현한 것. 군집은 계열 라벨 그대로라 **칸 = 군집 = 계열**.
+
+    부분집합이 여러 계열에 걸치면 L1(8대륙)으로, 한 계열로 좁히면 L2(하위계열)로 칸을
+    나눈다 — ``TargetFamilyMapDomain``의 적응형 라벨을 그대로 따른다.
+    """
+
+    name = "target_atlas"
+    label = "표적(지도첩)"
+    description = (
+        "큐레이션 계열별로 캔버스를 칸으로 나눠 강제 배치(겹침 0) — 칸 안은 ECFP "
+        "국소 분산축(SVD)으로 정렬. 결정론적, 칸=군집=계열."
+    )
+
+    #: Padding inside each cell (keeps points off the gutter) and the gutter
+    #: width between cells, both in cell-width units.
+    PAD = 0.08
+    GAP = 0.35
+
+    def featurize(self, compound_ids: Sequence[str]) -> DomainFeatures:
+        from dataclasses import replace
+
+        base = super().featurize(compound_ids)
+        labels = self._family_labels(tuple(compound_ids))
+        coords = self._atlas_coords(base.X, labels, base.covered)
+        return replace(
+            base,
+            coords=coords,
+            notes={**base.notes, "layout": "atlas-partition"},
+        )
+
+    def _atlas_coords(
+        self, X: np.ndarray, labels: np.ndarray, covered: np.ndarray
+    ) -> np.ndarray:
+        import math
+
+        from sklearn.decomposition import TruncatedSVD
+
+        n = X.shape[0]
+        coords = np.zeros((n, 2), dtype=np.float32)
+        fams = sorted({str(labels[i]) for i in range(n) if covered[i]})
+        k = len(fams)
+        if k == 0:
+            return coords
+        # A slightly wide grid reads better than a square one (8 -> 4x2).
+        cols = max(1, int(round(math.sqrt(k * 1.6))))
+        step = 1.0 + self.GAP
+        lo, hi = self.PAD, 1.0 - self.PAD
+        for idx, fam in enumerate(fams):
+            col, row = idx % cols, idx // cols
+            ox, oy = col * step, -row * step
+            mask = covered & (labels == fam)
+            Xf = X[mask]
+            local = self._local_layout(Xf, TruncatedSVD)
+            local = _minmax01(local) * (hi - lo) + lo
+            local[:, 0] += ox
+            local[:, 1] += oy
+            coords[mask] = local.astype(np.float32)
+        return coords
+
+    @staticmethod
+    def _local_layout(Xf: np.ndarray, TruncatedSVD) -> np.ndarray:
+        """Within-cell coordinates for one family: its ECFP local variance axes,
+        or a deterministic ring when it is too small / degenerate for SVD."""
+        m = Xf.shape[0]
+        if m >= 3 and Xf.shape[1] >= 2:
+            try:
+                svd = TruncatedSVD(n_components=2, random_state=0)
+                emb = svd.fit_transform(Xf.astype(np.float32))
+                if np.isfinite(emb).all() and np.ptp(emb) > 0:
+                    return emb
+            except Exception:  # pragma: no cover - SVD fallback
+                pass
+        ang = np.linspace(0.0, 2.0 * np.pi, max(m, 1), endpoint=False)
+        return np.column_stack([0.5 + 0.2 * np.cos(ang), 0.5 + 0.2 * np.sin(ang)])
+
+
 # --------------------------------------------------------------------------- #
 
 

@@ -186,10 +186,16 @@ def place(
         )
 
     Xf = features.X[fit]
-    yf = features.supervision[fit] if features.supervision is not None else None
-    emb, method, enote = _embed(
-        Xf, features.metric, embed, y=yf, target_weight=features.supervision_weight
-    )
+    if features.coords is not None:
+        # The domain supplied a deterministic layout (e.g. a family partition);
+        # use it directly for the covered rows instead of embedding X.
+        emb = np.ascontiguousarray(features.coords[fit], dtype=np.float32)
+        method, enote = "partition", {"layout": "precomputed"}
+    else:
+        yf = features.supervision[fit] if features.supervision is not None else None
+        emb, method, enote = _embed(
+            Xf, features.metric, embed, y=yf, target_weight=features.supervision_weight
+        )
     notes.update(enote)
     emb, sanitized = _finite(emb)
     if sanitized:
