@@ -963,17 +963,25 @@ class TargetAnchoredDomain(TargetFamilyMapDomain):
     def featurize(self, compound_ids: Sequence[str]) -> DomainFeatures:
         from dataclasses import replace
 
-        base = super().featurize(compound_ids)
-        labels = self._family_labels(tuple(compound_ids))
-        coords = self._anchored_coords(base.X, labels, base.covered)
+        ids = tuple(compound_ids)
+        base = super().featurize(ids)
+        labels = self._family_labels(ids)
+        coords = self._anchored_coords(base.X, labels, base.covered, ids)
         return replace(
             base,
             coords=coords,
-            notes={**base.notes, "layout": "anchored"},
+            notes={**base.notes, "layout": self.LAYOUT_NOTE},
         )
 
+    #: Note stamped on the placement so the diagnostics name the anchor source.
+    LAYOUT_NOTE = "anchored(structure)"
+
     def _anchored_coords(
-        self, X: np.ndarray, labels: np.ndarray, covered: np.ndarray
+        self,
+        X: np.ndarray,
+        labels: np.ndarray,
+        covered: np.ndarray,
+        ids: tuple[str, ...],
     ) -> np.ndarray:
         from sklearn.decomposition import TruncatedSVD
 
@@ -984,16 +992,30 @@ class TargetAnchoredDomain(TargetFamilyMapDomain):
         if k == 0:
             return coords
         masks = [covered & (labels == fam) for fam in fams]
-        cents = np.zeros((k, X.shape[1]), dtype=np.float64)
-        for i, m in enumerate(masks):
-            if m.any():
-                cents[i] = X[m].mean(axis=0)
-        anchors = _anchor_positions(cents, self.MIN_GAP)  # related families adjacent
+        vecs = self._family_vectors(fams, masks, X, ids)  # (k, d) anchor source
+        anchors = _anchor_positions(vecs, self.MIN_GAP)  # related families adjacent
         for i, m in enumerate(masks):
             local = TargetAtlasDomain._local_layout(X[m], TruncatedSVD)
             local = (_minmax01(local) * 2.0 - 1.0) * self.RADIUS  # disc around 0
             coords[m] = (anchors[i] + local).astype(np.float32)
         return coords
+
+    def _family_vectors(
+        self,
+        fams: list[str],
+        masks: list[np.ndarray],
+        X: np.ndarray,
+        ids: tuple[str, ...],
+    ) -> np.ndarray:
+        """One feature vector per family, whose pairwise similarity decides anchor
+        adjacency. Here: the family's mean ECFP (structural centroid), so families
+        with similar ligand chemistry sit together. Subclasses swap the notion of
+        relatedness by returning a different per-family matrix."""
+        cents = np.zeros((len(fams), X.shape[1]), dtype=np.float64)
+        for i, m in enumerate(masks):
+            if m.any():
+                cents[i] = X[m].mean(axis=0)
+        return cents
 
 
 def _space_out(A: np.ndarray, min_gap: float, iters: int = 80) -> np.ndarray:
@@ -1056,6 +1078,94 @@ def _anchor_positions(cents: np.ndarray, min_gap: float) -> np.ndarray:
     g = float(np.median(nn)) or 1.0
     A = A / g
     return _space_out(A, min_gap)
+
+
+def _compound_curated_family_sets(ds) -> dict:
+    """compound chembl_id -> frozenset of the curated L1 families its targets span.
+
+    A compound hits several targets across several classes; folding each target's
+    class path through :func:`curate` and unioning per compound gives the set of
+    families it touches. That multi-family membership is what lets two families
+    'co-occur' -- a single-family label per compound never would."""
+    from chemspace.data.target_class import curate
+
+    tgt = getattr(ds, "targets", None)
+    if tgt is None or getattr(tgt, "empty", True) or "chembl_id" not in tgt.columns:
+        return {}
+    cols = [c for c in ("chembl_id", "l1", "l2", "l3", "l4") if c in tgt.columns]
+    tc = tgt[cols].copy()
+    for c in ("l1", "l2", "l3", "l4"):
+        if c not in tc.columns:
+            tc[c] = ""
+    combos = tc[["l1", "l2", "l3", "l4"]].drop_duplicates()
+    cl1 = combos.apply(
+        lambda r: curate(r["l1"], r["l2"], r["l3"], r["l4"])[0], axis=1
+    )
+    combos = combos.assign(cl1=cl1.values)
+    tc = tc.merge(combos, on=["l1", "l2", "l3", "l4"], how="left")
+    tc = tc[tc["cl1"].astype(str) != ""]
+    out: dict[str, frozenset] = {}
+    for cid, grp in tc.groupby("chembl_id")["cl1"]:
+        out[cid] = frozenset(grp)
+    return out
+
+
+class TargetAnchoredCooccurDomain(TargetAnchoredDomain):
+    """연관배치(동시출현) — 앵커를 '같은 화합물이 함께 치는' 정도로 배치.
+
+    기본 연관배치는 리간드 구조(ECFP centroid)로 계열 이웃을 정했는데, 약물 분자가
+    공통 비트를 많이 공유해 계열 간 차이가 미묘했다. 이 변형은 relatedness를
+    polypharmacology로 정의한다: 한 화합물이 여러 계열의 표적을 동시에 칠 때 그 계열들을
+    '함께 출현'으로 보고, 계열×계열 동시출현 행렬(log1p)을 각 계열의 특징벡터로 삼아
+    앵커를 배치한다. **같은 약물을 공유하는 계열끼리 가까이** 앉아, 구조가 아니라
+    약리학적 교차가 지도의 이웃을 만든다. 둘레 분산·군집=계열·결정론은 연관배치와 동일.
+
+    (부분집합이 한 계열로 좁혀져 하위계열(L2)만 남으면 L1 동시출현이 비므로, 구조중심
+    앵커로 자동 대체한다.)
+    """
+
+    name = "target_anchored_cooccur"
+    label = "표적(연관배치·동시출현)"
+    description = (
+        "같은 화합물이 여러 계열을 함께 치는 정도(동시출현)로 앵커를 배치 — 약물을 공유하는 "
+        "계열끼리 가까이. 둘레 분산·군집=계열은 연관배치와 동일, 결정론적."
+    )
+    LAYOUT_NOTE = "anchored(cooccurrence)"
+
+    def _compound_family_sets(self) -> dict:
+        cache = getattr(self, "_fam_sets_cache", None)
+        if cache is None:
+            cache = _compound_curated_family_sets(self.ds)
+            self._fam_sets_cache = cache
+        return cache
+
+    def _family_vectors(
+        self,
+        fams: list[str],
+        masks: list[np.ndarray],
+        X: np.ndarray,
+        ids: tuple[str, ...],
+    ) -> np.ndarray:
+        fam_sets = self._compound_family_sets()
+        idx = {f: i for i, f in enumerate(fams)}
+        k = len(fams)
+        co = np.zeros((k, k), dtype=np.float64)
+        covered_any = np.zeros(len(ids), dtype=bool)
+        for m in masks:
+            covered_any |= m
+        for pos, cid in enumerate(ids):
+            if not covered_any[pos]:
+                continue
+            present = [idx[f] for f in fam_sets.get(cid, ()) if f in idx]
+            for a in present:
+                for b in present:
+                    co[a, b] += 1.0
+        off_diagonal = co - np.diag(np.diag(co))
+        if not np.any(off_diagonal):
+            # No family actually shares a compound here (e.g. an L2 drill-down):
+            # fall back to the structural centroids so the tab still works.
+            return super()._family_vectors(fams, masks, X, ids)
+        return np.log1p(co)
 
 
 # --------------------------------------------------------------------------- #
