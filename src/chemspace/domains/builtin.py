@@ -1168,6 +1168,75 @@ class TargetAnchoredCooccurDomain(TargetAnchoredDomain):
         return np.log1p(co)
 
 
+class TargetRelationalDomain(TargetAnchoredCooccurDomain):
+    """관련성배치 — 화합물을 '자기가 치는 계열들의 무게중심'에 두어, 배치 자체가
+    관련성으로 설명되게 한다.
+
+    연관배치(동시출현)는 계열 앵커만 관련성으로 정하고 화합물은 자기 계열 원판 안에
+    가뒀다 — 계열은 여전히 분리된 섬이었다. 이 도메인은 한 걸음 더 간다: 각 화합물을
+    **그 화합물의 표적이 걸치는 모든 큐레이션 계열 앵커의 무게중심(barycenter)** 에 둔다.
+
+    * 한 계열만 치는 화합물 → 그 계열 앵커에 모인다(촘촘한 핵).
+    * 여러 계열을 함께 치는(polypharmacology) 화합물 → 그 계열들 **사이**에 놓여, 계열을
+      잇는 **다리/겹침**을 만든다. 많이 공유될수록 다리가 짙다.
+
+    즉 거시 좌표는 '이 화합물이 어떤 계열들에 관여하고 그 계열들이 어떻게 관련되나'로
+    설명되고, 화학구조(ECFP SVD)는 핵 안의 작은 국소 흔들림(JITTER)만 더한다. 겹치고
+    섞이는 화합물은 의도적으로 겹쳐 놓는다. 앵커는 동시출현으로 잡고(상속), 군집은 대표
+    계열 라벨 그대로(=8 군집, 색=대표 계열)라 다리를 이루는 점도 자기 대표색으로 보인다.
+    """
+
+    name = "target_relational"
+    label = "표적(관련성배치)"
+    description = (
+        "화합물을 자기가 치는 계열 앵커들의 무게중심에 배치 — 여러 계열을 함께 치면 그 "
+        "사이(겹침)에 놓여 다리가 생긴다. 앵커는 동시출현, 구조는 국소 흔들림만. 결정론적."
+    )
+
+    LAYOUT_NOTE = "relational(barycentric)"
+
+    #: Structural texture added around each compound's relatedness barycenter.
+    #: Small, so relatedness — not structure — explains the macro layout.
+    JITTER = 0.18
+
+    def _anchored_coords(
+        self,
+        X: np.ndarray,
+        labels: np.ndarray,
+        covered: np.ndarray,
+        ids: tuple[str, ...],
+    ) -> np.ndarray:
+        from sklearn.decomposition import TruncatedSVD
+
+        n = X.shape[0]
+        coords = np.zeros((n, 2), dtype=np.float32)
+        fams = sorted({str(labels[i]) for i in range(n) if covered[i]})
+        k = len(fams)
+        if k == 0:
+            return coords
+        idx = {f: i for i, f in enumerate(fams)}
+        masks = [covered & (labels == fam) for fam in fams]
+        vecs = self._family_vectors(fams, masks, X, ids)  # co-occurrence anchors
+        anchors = _anchor_positions(vecs, self.MIN_GAP)
+        fam_sets = self._compound_family_sets()
+        # Macro position: barycenter of the anchors of every family this compound hits.
+        for pos, cid in enumerate(ids):
+            if not covered[pos]:
+                continue
+            members = [idx[f] for f in fam_sets.get(cid, ()) if f in idx]
+            if not members:
+                fam = str(labels[pos])
+                members = [idx[fam]] if fam in idx else []
+            if members:
+                coords[pos] = anchors[members].mean(axis=0)
+        # Micro texture: a small structural offset within each primary-family group.
+        for m in masks:
+            local = TargetAtlasDomain._local_layout(X[m], TruncatedSVD)
+            local = (_minmax01(local) * 2.0 - 1.0) * self.JITTER
+            coords[m] += local.astype(np.float32)
+        return coords
+
+
 # --------------------------------------------------------------------------- #
 
 
